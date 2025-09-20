@@ -1,0 +1,203 @@
+# Evaluation Configuration for Poisson-Gaussian Diffusion Restoration
+# This file configures the comprehensive evaluation framework
+
+# General settings
+device: 'auto'  # 'cuda', 'cpu', or 'auto'
+seed: 42
+output_dir: 'evaluation_results'
+
+# Evaluation settings
+evaluation:
+  # Standard metrics configuration
+  standard_metrics:
+    compute_psnr: true
+    compute_ssim: true
+    compute_lpips: true
+    compute_ms_ssim: true
+    data_range: 1.0
+
+  # Physics metrics configuration
+  physics_metrics:
+    compute_chi2: true
+    compute_whiteness: true
+    compute_bias: true
+    chi2_target: 1.0
+    bias_threshold_percent: 1.0
+
+  # Domain-specific metrics
+  domain_metrics:
+    microscopy:
+      counting_accuracy: true
+      counting_threshold: 0.1
+      resolution_preservation: true
+
+    astronomy:
+      photometry_error: true
+      aperture_radius: 5
+      resolution_preservation: true
+
+    photography:
+      resolution_preservation: true
+
+# Baseline methods configuration
+baselines:
+  # Classical methods
+  classical:
+    bm3d:
+      enabled: true
+
+    anscombe_bm3d:
+      enabled: true
+
+    richardson_lucy:
+      enabled: true
+      num_iterations: 10
+
+    gaussian:
+      enabled: true
+      sigma: 1.0
+
+  # Deep learning methods (require external implementations)
+  deep_learning:
+    dncnn:
+      enabled: false  # Set to true if model available
+      model_path: null
+
+    nafnet:
+      enabled: false  # Set to true if model available
+      model_path: null
+
+  # Diffusion baselines
+  diffusion:
+    l2_guided:
+      enabled: false  # Set to true if diffusion model available
+      steps: 18
+      guidance_weight: 1.0
+
+# Test data configuration
+test_data:
+  # Synthetic data generation
+  synthetic:
+    enabled: true
+    num_cases_per_domain: 2
+
+    # Test cases for different domains
+    photography:
+      scales: [5000, 2000]
+      read_noise_levels: [10, 15]
+      background: 5.0
+      image_size: [128, 128]
+
+    microscopy:
+      scales: [1000, 500]
+      read_noise_levels: [5, 8]
+      background: 5.0
+      image_size: [128, 128]
+
+    astronomy:
+      scales: [100, 50]
+      read_noise_levels: [3, 2]
+      background: 5.0
+      image_size: [128, 128]
+
+  # Real data paths (if available)
+  real_data:
+    photography:
+      root: null  # Path to photography test data
+      calibration: null  # Path to calibration file
+
+    microscopy:
+      root: null  # Path to microscopy test data
+      calibration: null  # Path to calibration file
+
+    astronomy:
+      root: null  # Path to astronomy test data
+      calibration: null  # Path to calibration file
+
+# Visualization settings
+visualization:
+  create_plots: true
+  plot_format: 'png'
+  dpi: 300
+  style: 'seaborn-v0_8'
+
+  # Plot types to generate
+  plots:
+    method_comparison: true
+    summary_statistics: true
+    domain_analysis: true
+    metric_correlations: true
+
+# Reporting settings
+reporting:
+  generate_markdown: true
+  generate_json: true
+  include_confidence_intervals: true
+  statistical_tests: true
+
+  # Report sections
+  sections:
+    executive_summary: true
+    method_comparison: true
+    domain_analysis: true
+    physics_validation: true
+    statistical_analysis: true
+    recommendations: true
+
+# Performance settings
+performance:
+  batch_size: 1
+  num_workers: 4
+  memory_limit_gb: 8
+
+  # Optimization flags
+  use_mixed_precision: false
+  compile_model: false
+
+# Logging configuration
+logging:
+  level: 'INFO'  # DEBUG, INFO, WARNING, ERROR
+  log_to_file: true
+  log_file: 'evaluation.log'
+
+  # What to log
+  log_individual_results: true
+  log_timing_info: true
+  log_memory_usage: false
+
+# Validation settings
+validation:
+  # Physics validation
+  chi2_tolerance: 0.2  # Allow χ² in [0.8, 1.2]
+  bias_tolerance: 2.0  # Allow bias up to 2%
+
+  # Performance validation
+  min_psnr_improvement: 1.0  # Minimum PSNR improvement over baselines
+  min_ssim_improvement: 0.05  # Minimum SSIM improvement
+
+  # Statistical significance
+  significance_level: 0.05
+  min_sample_size: 10
+
+# Advanced settings
+advanced:
+  # Bootstrap settings for confidence intervals
+  bootstrap:
+    enabled: true
+    n_bootstrap: 100
+    confidence_level: 0.95
+
+  # Cross-validation settings
+  cross_validation:
+    enabled: false
+    n_folds: 5
+    stratify_by_domain: true
+
+  # Ablation study settings
+  ablation:
+    enabled: false
+    components:
+      - 'noise_model'  # Poisson vs Gaussian
+      - 'guidance_mode'  # WLS vs exact
+      - 'conditioning'  # with vs without
+      - 'guidance_weight'  # different values

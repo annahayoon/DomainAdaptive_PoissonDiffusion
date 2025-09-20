@@ -1,0 +1,82 @@
+# Configuration for synthetic data generation for physics validation
+# This configuration generates comprehensive test data covering critical regimes
+
+# Image parameters
+image_size: 128
+num_images: 100
+
+# Photon level ranges (electrons)
+# Cover all critical regimes from ultra-low to high photon counts
+photon_levels:
+  # Ultra-low regime (<10 photons) - discrete Poisson dominates
+  - 0.5
+  - 1.0
+  - 2.0
+  - 5.0
+
+  # Low regime (10-100 photons) - transition region
+  - 10.0
+  - 25.0
+  - 50.0
+  - 100.0
+
+  # Medium regime (100-1000 photons) - mixed behavior
+  - 200.0
+  - 500.0
+  - 1000.0
+
+  # High regime (>1000 photons) - approaches Gaussian
+  - 2000.0
+  - 5000.0
+  - 10000.0
+
+# Read noise levels (electrons RMS)
+# Cover typical sensor characteristics
+read_noise_levels:
+  # Excellent sensors (scientific CMOS, cooled)
+  - 0.5
+  - 1.0
+
+  # Good sensors (modern CMOS)
+  - 2.0
+  - 3.0
+
+  # Typical sensors
+  - 5.0
+  - 8.0
+
+  # Poor sensors (older or high-speed)
+  - 10.0
+  - 15.0
+
+# Background level (electrons)
+background_level: 10.0
+
+# Pattern types for testing different image characteristics
+pattern_types:
+  - 'constant'        # Uniform intensity - simplest case
+  - 'gradient'        # Linear gradient - tests spatial variation
+  - 'checkerboard'    # High frequency - tests edge preservation
+  - 'gaussian_spots'  # Blob-like features - tests localized signals
+  - 'natural_image'   # Complex patterns - realistic test case
+
+# Output configuration
+output_dir: 'data/synthetic'
+save_plots: true
+save_metadata: true
+
+# Additional validation parameters
+validation:
+  # Expected chi-squared range for valid noise model
+  chi2_min: 0.8
+  chi2_max: 1.2
+
+  # SNR thresholds for different regimes
+  snr_thresholds:
+    ultra_low: -10.0   # dB, <10 photons
+    low: 0.0          # dB, 10-100 photons
+    medium: 10.0      # dB, 100-1000 photons
+    high: 20.0        # dB, >1000 photons
+
+  # Variance validation tolerance
+  variance_tolerance: 0.15  # 15% tolerance for variance matching

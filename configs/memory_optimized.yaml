@@ -1,0 +1,114 @@
+# Memory-optimized configurations for different GPU memory sizes
+
+# Configuration for 8GB GPUs (RTX 3070, RTX 4060 Ti)
+gpu_8gb:
+  training:
+    batch_size: 8
+    accumulate_grad_batches: 4  # Effective batch size = 32
+    mixed_precision: true
+    gradient_checkpointing: true
+
+  model:
+    model_channels: 96  # Reduced from 128
+    channel_mult: [1, 2, 2, 2]  # Conservative progression
+    dropout: 0.1
+
+  data:
+    num_workers: 4
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 2
+
+# Configuration for 12GB GPUs (RTX 3080 Ti, RTX 4070)
+gpu_12gb:
+  training:
+    batch_size: 12
+    accumulate_grad_batches: 3  # Effective batch size = 36
+    mixed_precision: true
+    gradient_checkpointing: false
+
+  model:
+    model_channels: 128
+    channel_mult: [1, 2, 4, 4]
+    dropout: 0.1
+
+  data:
+    num_workers: 6
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 2
+
+# Configuration for 16GB GPUs (RTX 4080, RTX 3090)
+gpu_16gb:
+  training:
+    batch_size: 16
+    accumulate_grad_batches: 2  # Effective batch size = 32
+    mixed_precision: true
+    gradient_checkpointing: false
+
+  model:
+    model_channels: 128
+    channel_mult: [1, 2, 4, 4]
+    dropout: 0.1
+
+  data:
+    num_workers: 8
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 2
+
+# Configuration for 24GB GPUs (RTX 4090, RTX 3090 Ti, A5000)
+gpu_24gb:
+  training:
+    batch_size: 24
+    accumulate_grad_batches: 1  # No accumulation needed
+    mixed_precision: true
+    gradient_checkpointing: false
+
+  model:
+    model_channels: 160  # Larger model
+    channel_mult: [1, 2, 4, 8]  # Deeper hierarchy
+    dropout: 0.1
+
+  data:
+    num_workers: 8
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 3
+
+# Configuration for 40GB+ GPUs (A100, H100)
+gpu_40gb:
+  training:
+    batch_size: 32
+    accumulate_grad_batches: 1
+    mixed_precision: true
+    gradient_checkpointing: false
+
+  model:
+    model_channels: 192  # Large model
+    channel_mult: [1, 2, 4, 8]
+    dropout: 0.1
+
+  data:
+    num_workers: 12
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 4
+
+# Automatic GPU memory detection settings
+auto_detect:
+  # Memory thresholds in GB
+  thresholds:
+    - memory_gb: 8
+      config: "gpu_8gb"
+    - memory_gb: 12
+      config: "gpu_12gb"
+    - memory_gb: 16
+      config: "gpu_16gb"
+    - memory_gb: 24
+      config: "gpu_24gb"
+    - memory_gb: 40
+      config: "gpu_40gb"
+
+  # Safety margin (reduce batch size by this factor)
+  safety_margin: 0.9

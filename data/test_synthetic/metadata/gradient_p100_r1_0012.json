@@ -1,0 +1,11 @@
+{
+  "pattern_type": "gradient",
+  "photon_level": 100.0,
+  "read_noise": 1.0,
+  "background": 10.0,
+  "image_size": 128,
+  "mean_photons": 59.999996185302734,
+  "theoretical_variance": 60.999996185302734,
+  "empirical_variance": 61.748085021972656,
+  "snr_db": 8.85486364364624
+}

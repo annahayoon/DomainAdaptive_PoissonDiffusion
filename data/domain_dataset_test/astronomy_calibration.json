@@ -1,0 +1,9 @@
+{
+  "gain": 1.5,
+  "black_level": 0,
+  "white_level": 65535,
+  "read_noise": 2.0,
+  "pixel_size": 0.04,
+  "pixel_unit": "arcsec",
+  "domain": "astronomy"
+}

@@ -1,0 +1,68 @@
+# Pre-commit hooks for code quality
+repos:
+  # Black code formatting
+  - repo: https://github.com/psf/black
+    rev: 23.12.1
+    hooks:
+      - id: black
+        language_version: python3
+        exclude: ^external/
+
+  # isort import sorting
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args: ["--profile", "black"]
+        exclude: ^external/
+
+  # flake8 linting
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.0.0
+    hooks:
+      - id: flake8
+        args: [
+          "--max-line-length=88",
+          "--extend-ignore=E203,W503",
+          "--exclude=external"
+        ]
+
+  # mypy type checking
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.8.0
+    hooks:
+      - id: mypy
+        additional_dependencies: [types-PyYAML, types-tqdm]
+        exclude: ^external/
+
+  # General hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^external/
+      - id: end-of-file-fixer
+        exclude: ^external/
+      - id: check-yaml
+        exclude: ^external/
+      - id: check-json
+        exclude: ^external/
+      - id: check-toml
+        exclude: ^external/
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: debug-statements
+        exclude: ^external/
+
+  # Security checks
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.6
+    hooks:
+      - id: bandit
+        args: ["-r", ".", "-x", "external,tests"]
+        exclude: ^external/
+
+# Configuration
+default_stages: [pre-commit]
+fail_fast: false

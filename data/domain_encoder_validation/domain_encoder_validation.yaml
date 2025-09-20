@@ -1,0 +1,103 @@
+batch_processing:
+  batch_size_1: true
+  batch_size_16: true
+  batch_size_2: true
+  batch_size_4: true
+  batch_size_8: true
+  mixed_domains: true
+conditioning_ranges:
+  domain_astronomy:
+    max: 1.0
+    mean: 0.3333333432674408
+    median: 0.0
+    min: 0.0
+    std: 0.4720343053340912
+  domain_microscopy:
+    max: 1.0
+    mean: 0.3333333432674408
+    median: 0.0
+    min: 0.0
+    std: 0.4720343053340912
+  domain_photography:
+    max: 1.0
+    mean: 0.3333333432674408
+    median: 0.0
+    min: 0.0
+    std: 0.4720343053340912
+  log_scale_norm:
+    max: 1.198970079421997
+    mean: 0.07160206139087677
+    median: 0.19897007942199707
+    min: -1.5
+    std: 0.7444242238998413
+  rel_background:
+    max: 10.0
+    mean: 0.3582266867160797
+    median: 0.019999999552965164
+    min: 0.0
+    std: 1.3073025941848755
+  rel_read_noise:
+    max: 2.0
+    mean: 0.07859156280755997
+    median: 0.00800000037997961
+    min: 0.00016666666488163173
+    std: 0.2638624310493469
+encode_decode_consistency:
+  astronomy_background_error: 1.9073486612342094e-07
+  astronomy_read_noise_error: 1.9073486612342094e-07
+  astronomy_scale_error: 1.8310547034161573e-07
+  microscopy_background_error: 1.9073486612342094e-07
+  microscopy_read_noise_error: 2.384185791015625e-07
+  microscopy_scale_error: 1.8310547034161573e-07
+  photography_background_error: 0.0
+  photography_read_noise_error: 0.0
+  photography_scale_error: 0.0
+log_scale_normalization:
+  mean: -0.5
+  monotonicity: true
+  range_max: 1.5
+  range_min: -2.5
+  std: 1.4142135623730951
+numerical_stability:
+  huge_background: true
+  huge_read_noise: true
+  huge_scale: true
+  negative_background: true
+  tiny_scale: true
+  zero_read_noise: true
+  zero_scale: true
+one_hot_encoding:
+  astronomy: true
+  batch_encoding: true
+  microscopy: true
+  photography: true
+relative_parameters:
+  case_0:
+    expected_rel_bg: 0.05
+    expected_rel_rn: 0.1
+    rel_background: 0.05000000074505806
+    rel_read_noise: 0.10000000149011612
+  case_1:
+    expected_rel_bg: 0.1
+    expected_rel_rn: 0.05
+    rel_background: 0.10000000149011612
+    rel_read_noise: 0.05000000074505806
+  case_2:
+    expected_rel_bg: 0.05
+    expected_rel_rn: 0.05
+    rel_background: 0.05000000074505806
+    rel_read_noise: 0.05000000074505806
+summary:
+  log_scale_range:
+  - -1.5
+  - 1.198970079421997
+  overall_pass: true
+  pass_rate: 1.0
+  passed_tests: 18
+  rel_background_range:
+  - 0.0
+  - 10.0
+  rel_read_noise_range:
+  - 0.00016666666488163173
+  - 2.0
+  total_tests: 18

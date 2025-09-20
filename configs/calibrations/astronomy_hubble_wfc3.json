@@ -1,0 +1,22 @@
+{
+  "calibration": {
+    "gain": 2.0,
+    "black_level": 0,
+    "white_level": 65535,
+    "read_noise": 5.0,
+    "dark_current": 0.05,
+    "quantum_efficiency": 0.9,
+    "pixel_size": 0.04,
+    "pixel_unit": "arcsec",
+    "sensor_name": "Hubble_WFC3_CCD",
+    "bit_depth": 16,
+    "temperature": -80.0,
+    "domain": "astronomy"
+  },
+  "metadata": {
+    "created_by": "SensorCalibration",
+    "version": "1.0",
+    "description": "Hubble Space Telescope WFC3 CCD calibration",
+    "reference": "HST WFC3 Instrument Handbook values"
+  }
+}
