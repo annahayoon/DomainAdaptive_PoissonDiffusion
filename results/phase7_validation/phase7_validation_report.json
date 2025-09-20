@@ -1,0 +1,122 @@
+{
+  "phase": "Phase 7: Validation & Testing",
+  "timestamp": "2025-09-20 00:29:12",
+  "total_duration_seconds": 6.61065411567688,
+  "overall_status": "FAILED",
+  "main_test_summary": {
+    "total_test_suites": 3,
+    "passed_test_suites": 0,
+    "suite_success_rate": 0.0,
+    "total_individual_tests": 0,
+    "passed_individual_tests": 0,
+    "failed_individual_tests": 0,
+    "error_individual_tests": 0,
+    "individual_test_success_rate": 0
+  },
+  "regression_test_summary": {
+    "regression_success_rate": 0.0,
+    "regression_status": "FAILED"
+  },
+  "detailed_results": {
+    "integration_tests": {
+      "suite_name": "integration_tests",
+      "module": "test_end_to_end_integration.py",
+      "duration_seconds": 0.821791410446167,
+      "exit_code": 4,
+      "stdout": "",
+      "stderr": "ERROR: usage: __main__.py [options] [file_or_dir] [file_or_dir] [...]\n__main__.py: error: unrecognized arguments: --json-report --json-report-file=results/phase7_validation/integration_tests_report.json\n  inifile: /home/jilab/Jae/pyproject.toml\n  rootdir: /home/jilab/Jae\n\n",
+      "status": "FAILED",
+      "note": "Detailed metrics unavailable"
+    },
+    "scientific_validation": {
+      "suite_name": "scientific_validation",
+      "module": "test_scientific_validation.py",
+      "duration_seconds": 0.8289017677307129,
+      "exit_code": 4,
+      "stdout": "",
+      "stderr": "ERROR: usage: __main__.py [options] [file_or_dir] [file_or_dir] [...]\n__main__.py: error: unrecognized arguments: --json-report --json-report-file=results/phase7_validation/scientific_validation_report.json\n  inifile: /home/jilab/Jae/pyproject.toml\n  rootdir: /home/jilab/Jae\n\n",
+      "status": "FAILED",
+      "note": "Detailed metrics unavailable"
+    },
+    "edge_case_tests": {
+      "suite_name": "edge_case_tests",
+      "module": "test_edge_case_handling.py",
+      "duration_seconds": 0.8419783115386963,
+      "exit_code": 4,
+      "stdout": "",
+      "stderr": "ERROR: usage: __main__.py [options] [file_or_dir] [file_or_dir] [...]\n__main__.py: error: unrecognized arguments: --json-report --json-report-file=results/phase7_validation/edge_case_tests_report.json\n  inifile: /home/jilab/Jae/pyproject.toml\n  rootdir: /home/jilab/Jae\n\n",
+      "status": "FAILED",
+      "note": "Detailed metrics unavailable"
+    },
+    "regression_tests": {
+      "total_regression_suites": 5,
+      "passed_regression_suites": 0,
+      "regression_success_rate": 0.0,
+      "individual_results": {
+        "transforms_regression": {
+          "suite_name": "transforms_regression",
+          "module": "test_transforms.py",
+          "duration_seconds": 0.8330810070037842,
+          "exit_code": 4,
+          "stdout": "",
+          "stderr": "ERROR: usage: __main__.py [options] [file_or_dir] [file_or_dir] [...]\n__main__.py: error: unrecognized arguments: --json-report --json-report-file=results/phase7_validation/transforms_regression_report.json\n  inifile: /home/jilab/Jae/pyproject.toml\n  rootdir: /home/jilab/Jae\n\n",
+          "status": "FAILED",
+          "note": "Detailed metrics unavailable"
+        },
+        "calibration_regression": {
+          "suite_name": "calibration_regression",
+          "module": "test_calibration.py",
+          "duration_seconds": 0.8035562038421631,
+          "exit_code": 4,
+          "stdout": "",
+          "stderr": "ERROR: usage: __main__.py [options] [file_or_dir] [file_or_dir] [...]\n__main__.py: error: unrecognized arguments: --json-report --json-report-file=results/phase7_validation/calibration_regression_report.json\n  inifile: /home/jilab/Jae/pyproject.toml\n  rootdir: /home/jilab/Jae\n\n",
+          "status": "FAILED",
+          "note": "Detailed metrics unavailable"
+        },
+        "guidance_regression": {
+          "suite_name": "guidance_regression",
+          "module": "test_poisson_guidance.py",
+          "duration_seconds": 0.8437380790710449,
+          "exit_code": 4,
+          "stdout": "",
+          "stderr": "ERROR: usage: __main__.py [options] [file_or_dir] [file_or_dir] [...]\n__main__.py: error: unrecognized arguments: --json-report --json-report-file=results/phase7_validation/guidance_regression_report.json\n  inifile: /home/jilab/Jae/pyproject.toml\n  rootdir: /home/jilab/Jae\n\n",
+          "status": "FAILED",
+          "note": "Detailed metrics unavailable"
+        },
+        "metrics_regression": {
+          "suite_name": "metrics_regression",
+          "module": "test_metrics.py",
+          "duration_seconds": 0.8179008960723877,
+          "exit_code": 4,
+          "stdout": "",
+          "stderr": "ERROR: usage: __main__.py [options] [file_or_dir] [file_or_dir] [...]\n__main__.py: error: unrecognized arguments: --json-report --json-report-file=results/phase7_validation/metrics_regression_report.json\n  inifile: /home/jilab/Jae/pyproject.toml\n  rootdir: /home/jilab/Jae\n\n",
+          "status": "FAILED",
+          "note": "Detailed metrics unavailable"
+        },
+        "patch_processing_regression": {
+          "suite_name": "patch_processing_regression",
+          "module": "test_patch_processing.py",
+          "duration_seconds": 0.8042557239532471,
+          "exit_code": 4,
+          "stdout": "",
+          "stderr": "ERROR: usage: __main__.py [options] [file_or_dir] [file_or_dir] [...]\n__main__.py: error: unrecognized arguments: --json-report --json-report-file=results/phase7_validation/patch_processing_regression_report.json\n  inifile: /home/jilab/Jae/pyproject.toml\n  rootdir: /home/jilab/Jae\n\n",
+          "status": "FAILED",
+          "note": "Detailed metrics unavailable"
+        }
+      }
+    }
+  },
+  "requirements_compliance": {
+    "task_7_1_integration": false,
+    "task_7_2_scientific": false,
+    "task_7_3_edge_cases": false,
+    "no_regressions": false
+  },
+  "recommendations": [
+    "\u274c Major validation failures - system not ready for deployment",
+    "\ud83d\udea8 Critical issues detected - comprehensive review required",
+    "\ud83d\udd27 Fix integration test failures - end-to-end pipeline issues detected",
+    "\ud83e\uddea Address scientific validation failures - physics implementation issues",
+    "\ud83d\udee1\ufe0f  Improve edge case handling - robustness issues detected"
+  ]
+}

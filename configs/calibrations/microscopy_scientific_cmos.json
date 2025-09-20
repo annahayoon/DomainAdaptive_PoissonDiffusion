@@ -1,0 +1,22 @@
+{
+  "calibration": {
+    "gain": 0.5,
+    "black_level": 100,
+    "white_level": 65535,
+    "read_noise": 1.5,
+    "dark_current": 0.01,
+    "quantum_efficiency": 0.95,
+    "pixel_size": 0.65,
+    "pixel_unit": "um",
+    "sensor_name": "Generic_Scientific_CMOS",
+    "bit_depth": 16,
+    "temperature": -10.0,
+    "domain": "microscopy"
+  },
+  "metadata": {
+    "created_by": "SensorCalibration",
+    "version": "1.0",
+    "description": "Scientific CMOS sensor for fluorescence microscopy",
+    "reference": "Typical values for cooled sCMOS at 20x magnification"
+  }
+}

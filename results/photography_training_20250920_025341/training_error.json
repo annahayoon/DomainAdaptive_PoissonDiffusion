@@ -1,0 +1,6 @@
+{
+  "error": "Caught TypeError in DataLoader worker process 2.\nOriginal Traceback (most recent call last):\n  File \"/home/jilab/miniconda3/lib/python3.12/site-packages/torch/utils/data/_utils/worker.py\", line 349, in _worker_loop\n    data = fetcher.fetch(index)  # type: ignore[possibly-undefined]\n           ^^^^^^^^^^^^^^^^^^^^\n  File \"/home/jilab/miniconda3/lib/python3.12/site-packages/torch/utils/data/_utils/fetch.py\", line 55, in fetch\n    return self.collate_fn(data)\n           ^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/jilab/Jae/poisson_training/multi_domain_trainer.py\", line 458, in _collate_fn\n    values = [item[field] for item in batch]\n              ~~~~^^^^^^^\nTypeError: 'NoneType' object is not subscriptable\n",
+  "training_time_hours": 0.1392552329434289,
+  "failed_epoch": 0,
+  "device": "cuda"
+}

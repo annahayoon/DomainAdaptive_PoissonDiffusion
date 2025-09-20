@@ -1,0 +1,6 @@
+{
+  "error": "'electrons'",
+  "training_time_hours": 0.0016712347666422527,
+  "failed_epoch": 0,
+  "device": "cuda"
+}

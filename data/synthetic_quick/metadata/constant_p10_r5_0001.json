@@ -1,0 +1,11 @@
+{
+  "pattern_type": "constant",
+  "photon_level": 10,
+  "read_noise": 5,
+  "background": 10.0,
+  "image_size": 128,
+  "mean_photons": 15.0,
+  "theoretical_variance": 40.0,
+  "empirical_variance": 39.60822296142578,
+  "snr_db": 3.750612735748291
+}

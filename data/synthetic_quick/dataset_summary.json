@@ -1,0 +1,39 @@
+{
+  "config": {
+    "image_size": 128,
+    "num_images": 100,
+    "photon_levels": [
+      10,
+      100,
+      1000
+    ],
+    "read_noise_levels": [
+      1,
+      5
+    ],
+    "background_level": 10.0,
+    "pattern_types": [
+      "constant",
+      "gradient"
+    ],
+    "output_dir": "data/synthetic_quick",
+    "save_plots": true,
+    "save_metadata": true
+  },
+  "total_images": 12,
+  "statistics_summary": {
+    "photon_level_range": [
+      10.0,
+      1000.0
+    ],
+    "read_noise_range": [
+      1.0,
+      5.0
+    ],
+    "snr_range_db": [
+      3.750612735748291,
+      13.533598184585571
+    ],
+    "num_patterns": 1
+  }
+}

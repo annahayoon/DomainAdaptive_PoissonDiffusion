@@ -1,0 +1,14 @@
+{
+  "success": true,
+  "errors": [],
+  "metrics": {
+    "gpu_available": true,
+    "gpu_name": "NVIDIA A40",
+    "gpu_memory_gb": 44.451416015625,
+    "device": "cuda",
+    "tensor_op_time_ms": 1.4369487762451172,
+    "memory_usage_mb": 1.44921875,
+    "cpu_count": 72,
+    "total_memory_gb": 125.48823547363281
+  }
+}
