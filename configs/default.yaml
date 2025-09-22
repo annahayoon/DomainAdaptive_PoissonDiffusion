@@ -1,12 +1,15 @@
 # Default configuration for Poisson-Gaussian Diffusion
 
-# Model configuration
+# Model configuration - Enhanced for research-level performance
 model:
   architecture: "EDM"
   img_channels: 1
   img_resolution: 128
-  model_channels: 128
-  channel_mult: [1, 2, 4, 4]  # Better feature hierarchy
+  model_channels: 256  # Increased from 128 to 256 for better capacity
+  channel_mult: [1, 2, 3, 4]  # More aggressive scaling for better features
+  channel_mult_emb: 6  # Increased from 4 to 6 for larger embedding
+  num_blocks: 6  # Increased from 4 to 6 for deeper network
+  attn_resolutions: [16, 32, 64]  # Multi-scale attention optimized for patch-based processing
   condition_dim: 6
   dropout: 0.1  # Add regularization
 

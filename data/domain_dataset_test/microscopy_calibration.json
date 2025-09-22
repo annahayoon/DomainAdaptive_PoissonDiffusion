@@ -1,9 +1,0 @@
-{
-  "gain": 2.0,
-  "black_level": 100,
-  "white_level": 65535,
-  "read_noise": 3.0,
-  "pixel_size": 0.65,
-  "pixel_unit": "um",
-  "domain": "microscopy"
-}

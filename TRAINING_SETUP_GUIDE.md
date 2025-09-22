@@ -139,7 +139,7 @@ tensorboard --logdir results/photography_training_*/tensorboard
 ```
 results/photography_training_YYYYMMDD_HHMMSS/
 ├── checkpoints/
-│   ├── best_checkpoint.pt          # Best model
+│   ├── best_model.pt               # Best model
 │   ├── checkpoint_epoch_005.pt     # Every 5 epochs
 │   └── checkpoint_epoch_010.pt
 ├── logs/
@@ -225,7 +225,7 @@ python train_photography_model.py --device cpu --data_root /path/to/data
 #### **1. Model Evaluation**
 ```bash
 # Evaluate trained model
-python scripts/evaluate_baselines.py --model_path results/photography_training_*/checkpoints/best_checkpoint.pt
+python scripts/evaluate_baselines.py --model_path results/photography_training_*/checkpoints/best_model.pt
 
 # Test on new data
 python scripts/test_domain_dataset_integration.py

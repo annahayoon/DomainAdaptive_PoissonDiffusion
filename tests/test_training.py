@@ -569,7 +569,7 @@ class TestDeterministicTrainer:
             trainer.save_checkpoint(is_best=True)
 
             # Load checkpoint
-            checkpoint_path = Path(tmp_dir) / "best_checkpoint.pt"
+            checkpoint_path = Path(tmp_dir) / "best_model.pt"
             assert checkpoint_path.exists()
 
             # Create new trainer and load

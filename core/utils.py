@@ -8,7 +8,7 @@ validation, logging, and other shared functionality.
 import logging
 import warnings
 from pathlib import Path
-from typing import Any, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -183,7 +183,7 @@ def get_device(prefer_cuda: bool = True) -> torch.device:
 
 
 def estimate_memory_usage(
-    tensor_shapes: list[Tuple[int, ...]],
+    tensor_shapes: List[Tuple[int, ...]],
     dtype: torch.dtype = torch.float32,
     overhead_factor: float = 1.5,
 ) -> float:

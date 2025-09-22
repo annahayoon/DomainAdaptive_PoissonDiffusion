@@ -98,19 +98,23 @@ def _get_dataset_category(dataset_size: int) -> str:
 
 
 def print_training_analysis(config: Dict[str, Any]) -> None:
-    """Print detailed training analysis."""
-    print("🎯 OPTIMAL TRAINING CONFIGURATION")
+    """Print detailed training analysis (diffusion standard)."""
+    print("🎯 DIFFUSION MODEL TRAINING CONFIGURATION")
     print("=" * 50)
     print(f"📊 Dataset: {config['dataset_size']:,} samples ({config['category']})")
     print(f"🔢 Batch Size: {config['batch_size']}")
     print(f"📈 Steps per Epoch: {config['steps_per_epoch']:,}")
-    print(f"🎯 Recommended Epochs: {config['recommended_epochs']:,}")
-    print(f"🚀 Total Training Steps: {config['total_training_steps']:,}")
-    print(f"📝 Steps per Sample: {config['steps_per_sample']}")
+    print()
+    print("🚀 PRIMARY METRICS (Diffusion Standard):")
+    print(f"   Total Training Steps: {config['total_training_steps']:,}")
+    print(f"   Steps per Sample: {config['steps_per_sample']}")
+    print()
+    print("📋 SECONDARY METRICS (Derived):")
+    print(f"   Recommended Epochs: {config['recommended_epochs']:,}")
     print(f"⏱️  Estimated Time: {config['estimated_time_hours']:.1f} hours")
     print()
 
-    # Best practices check
+    # Best practices check (diffusion standard)
     if config["steps_per_sample"] < 5:
         print("⚠️  WARNING: Low steps per sample - may underfit")
     elif config["steps_per_sample"] > 50:
