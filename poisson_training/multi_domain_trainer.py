@@ -24,7 +24,7 @@ import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -464,6 +464,7 @@ class MultiDomainTrainer(DeterministicTrainer):
         output_dir: Optional[Path] = None,
         loss_fn: Optional[nn.Module] = None,
         metrics: Optional[TrainingMetrics] = None,
+        collate_fn: Optional[Callable] = None,
     ):
         """
         Initialize multi-domain trainer.
@@ -476,7 +477,11 @@ class MultiDomainTrainer(DeterministicTrainer):
             output_dir: Output directory for saving configurations and results
             loss_fn: Loss function (will create if None)
             metrics: Metrics tracker (will create if None)
+            collate_fn: Custom collate function (optional)
         """
+        # Store custom collate function
+        self.custom_collate_fn = collate_fn
+
         # Initialize domain conditioning
         self.domains = list(train_dataset.domain_datasets.keys())
         self.domain_encoder = DomainConditioningEncoder(
@@ -733,6 +738,34 @@ class MultiDomainTrainer(DeterministicTrainer):
                 else None
             )
 
+            # Use custom collate function if provided and this is astronomy data, otherwise use default
+            # The custom collate function is specifically designed for astronomy data preprocessing
+            final_collate_fn = None
+            if self.custom_collate_fn is not None:
+                # Check if this dataset contains astronomy data
+                has_astronomy = False
+                if hasattr(dataset, "domain_datasets"):
+                    domains = list(dataset.domain_datasets.keys())
+                    has_astronomy = "astronomy" in domains or (
+                        len(domains) == 1 and domains[0] == "astronomy"
+                    )
+                elif hasattr(dataset, "train_dataset") and hasattr(
+                    dataset.train_dataset, "domain_datasets"
+                ):
+                    # Check the underlying dataset
+                    domains = list(dataset.train_dataset.domain_datasets.keys())
+                    has_astronomy = "astronomy" in domains or (
+                        len(domains) == 1 and domains[0] == "astronomy"
+                    )
+
+                if has_astronomy:
+                    final_collate_fn = self.custom_collate_fn
+                    logger.info("🔬 Using custom astronomy collate function")
+                else:
+                    final_collate_fn = collate_fn
+            else:
+                final_collate_fn = collate_fn
+
             return DataLoader(
                 dataset,
                 batch_size=config.batch_size,
@@ -743,7 +776,7 @@ class MultiDomainTrainer(DeterministicTrainer):
                 prefetch_factor=getattr(config, "prefetch_factor", 2)
                 if num_workers > 0
                 else None,
-                collate_fn=collate_fn,
+                collate_fn=final_collate_fn,
                 worker_init_fn=worker_init_fn,
                 # Add timeout for worker processes to prevent hanging
                 timeout=30 if num_workers > 0 else 0,
@@ -770,6 +803,34 @@ class MultiDomainTrainer(DeterministicTrainer):
                 else None
             )
 
+            # Use custom collate function if provided and this is astronomy data, otherwise use default
+            # The custom collate function is specifically designed for astronomy data preprocessing
+            final_collate_fn = None
+            if self.custom_collate_fn is not None:
+                # Check if this dataset contains astronomy data
+                has_astronomy = False
+                if hasattr(dataset, "domain_datasets"):
+                    domains = list(dataset.domain_datasets.keys())
+                    has_astronomy = "astronomy" in domains or (
+                        len(domains) == 1 and domains[0] == "astronomy"
+                    )
+                elif hasattr(dataset, "train_dataset") and hasattr(
+                    dataset.train_dataset, "domain_datasets"
+                ):
+                    # Check the underlying dataset
+                    domains = list(dataset.train_dataset.domain_datasets.keys())
+                    has_astronomy = "astronomy" in domains or (
+                        len(domains) == 1 and domains[0] == "astronomy"
+                    )
+
+                if has_astronomy:
+                    final_collate_fn = self.custom_collate_fn
+                    logger.info("🔬 Using custom astronomy collate function")
+                else:
+                    final_collate_fn = collate_fn
+            else:
+                final_collate_fn = collate_fn
+
             return DataLoader(
                 dataset,
                 batch_size=config.batch_size,
@@ -781,7 +842,7 @@ class MultiDomainTrainer(DeterministicTrainer):
                 prefetch_factor=getattr(config, "prefetch_factor", 2)
                 if num_workers > 0
                 else None,
-                collate_fn=collate_fn,
+                collate_fn=final_collate_fn,
                 worker_init_fn=worker_init_fn,
                 # Add timeout for worker processes to prevent hanging
                 timeout=30 if num_workers > 0 else 0,

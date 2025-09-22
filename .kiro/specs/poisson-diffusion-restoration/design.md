@@ -289,9 +289,62 @@ class TrainingBatch:
 3. **Scalability**: Test with varying batch sizes and resolutions
 4. **GPU Utilization**: Monitor compute efficiency during training/inference
 
+## L2-Guided Diffusion Baseline System
+
+### 5. Unified Guidance Architecture
+
+**Purpose**: Provide scientifically rigorous L2 baseline that shares all infrastructure with Poisson-Gaussian method except guidance computation.
+
+**Core Classes**:
+- `GuidanceComputer`: Abstract interface for all guidance methods
+- `L2Guidance`: Simple MSE-based likelihood guidance
+- `GuidanceFactory`: Factory for creating Poisson vs L2 guidance
+- `UnifiedSampler`: Polymorphic sampler supporting both guidance types
+
+**Key Interfaces**:
+```python
+class GuidanceComputer(ABC):
+    @abstractmethod
+    def compute_score(self, x_hat: torch.Tensor, y_observed: torch.Tensor) -> torch.Tensor
+    @abstractmethod
+    def gamma_schedule(self, sigma: torch.Tensor) -> torch.Tensor
+
+    def compute(self, x_hat: torch.Tensor, y_observed: torch.Tensor, sigma_t: torch.Tensor) -> torch.Tensor:
+        # Shared implementation for both guidance types
+        score = self.compute_score(x_hat, y_observed)
+        gamma = self.gamma_schedule(sigma_t)
+        return score * gamma
+
+class L2Guidance(GuidanceComputer):
+    def compute_score(self, x_hat: torch.Tensor, y_observed: torch.Tensor) -> torch.Tensor:
+        # Simple MSE gradient: scale * (y - prediction) / noise_variance
+        prediction = self.scale * x_hat + self.background
+        return (self.scale / self.noise_variance) * (y_observed - prediction)
+
+class GuidanceFactory:
+    @staticmethod
+    def create_guidance(guidance_type: str, **params) -> GuidanceComputer:
+        if guidance_type == "poisson":
+            return PoissonGuidance(**params)
+        elif guidance_type == "l2":
+            return L2Guidance(**params)
+```
+
+**L2 Guidance Mathematical Foundation**:
+- **Assumption**: y ~ N(s·x + b, σ²) with uniform noise variance
+- **Gradient**: ∇ log p(y|x) = s·(y - s·x - b) / σ²
+- **Scheduling**: γ(σ) = κ·σ² (identical to Poisson-Gaussian for fair comparison)
+- **Stability**: Same gradient clipping and numerical safeguards
+
+**Fair Comparison Strategy**:
+1. **Identical Architecture**: Same EDM model, conditioning, and training pipeline
+2. **Identical Hyperparameters**: Same κ, scheduling, and optimization settings
+3. **Identical Data**: Same random seeds, splits, and preprocessing
+4. **Identical Evaluation**: Same metrics, protocols, and statistical analysis
+
 ## Multi-Resolution System Components
 
-### 5. Progressive Growing Architecture
+### 6. Progressive Growing Architecture
 
 **Purpose**: Enable training and inference at multiple resolutions with progressive quality improvement.
 
@@ -414,7 +467,13 @@ class ProcessingConstraints:
 - Adaptive resolution pipeline
 - Multi-resolution training framework
 
-### Phase 5: Validation and Polish (Weeks 9-10)
+### Phase 5: L2-Guided Diffusion Baseline (Week 9)
+- L2 guidance system implementation
+- Unified guidance architecture with polymorphic interface
+- Identical training pipeline for fair comparison
+- Comparative evaluation framework
+
+### Phase 6: Validation and Polish (Weeks 10-11)
 - Scientific validation on real data
 - Documentation and examples
 - Performance benchmarking

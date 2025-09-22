@@ -1,0 +1,154 @@
+# Comprehensive Evaluation Configuration
+# Configuration for comparing PG-guidance vs L2-guidance vs baseline methods
+
+# General settings
+device: 'auto'  # 'cuda', 'cpu', or 'auto'
+seed: 42
+output_dir: 'comprehensive_evaluation_results'
+
+# Model settings
+model:
+  path: 'hpc_result/best_model.pt'  # Path to trained model
+  fallback_to_demo: true  # Use demo model if trained model not available
+
+# Evaluation settings
+evaluation:
+  # Domains to evaluate
+  domains:
+    - 'photography'
+    - 'microscopy'
+    - 'astronomy'
+
+  # Number of test scenes per domain
+  num_scenes_per_domain: 5
+
+  # Methods to compare (as specified in proposal)
+  methods:
+    - 'PG-Guidance'        # Our Poisson-Gaussian guidance
+    - 'L2-Guidance'        # Standard L2/MSE guidance for comparison
+    - 'BM3D'              # Classical denoising
+    - 'Anscombe-BM3D'     # Poisson-aware classical method
+    - 'Gaussian'          # Simple Gaussian denoising
+    - 'DnCNN'             # Deep learning baseline
+    - 'NAFNet'            # Modern deep learning baseline
+    - 'Richardson-Lucy'   # Classical iterative method
+    - 'Wiener'            # Classical frequency domain method
+
+  # Diffusion sampling settings
+  sampling:
+    num_steps: 18
+    guidance_weight: 1.0
+    solver: 'euler'
+    sigma_min: 0.002
+    sigma_max: 80.0
+    rho: 7.0
+
+# Test data configuration (based on proposal Table 1)
+test_data:
+  image_size: [128, 128]
+
+  # Photography domain test cases (high ISO noise scenarios)
+  photography:
+    test_cases:
+      - {scale: 5000, read_noise: 10, background: 5.0}  # Moderate low-light
+      - {scale: 2000, read_noise: 15, background: 5.0}  # Low-light
+      - {scale: 1000, read_noise: 20, background: 5.0}  # Very low-light
+      - {scale: 500, read_noise: 25, background: 5.0}   # Extreme low-light
+      - {scale: 100, read_noise: 30, background: 5.0}   # <100 photon regime
+
+  # Microscopy domain test cases (photobleaching limits)
+  microscopy:
+    test_cases:
+      - {scale: 1000, read_noise: 5, background: 5.0}   # Standard fluorescence
+      - {scale: 500, read_noise: 8, background: 5.0}    # Reduced excitation
+      - {scale: 200, read_noise: 10, background: 5.0}   # Low excitation
+      - {scale: 100, read_noise: 12, background: 5.0}   # Very low excitation
+      - {scale: 50, read_noise: 15, background: 5.0}    # Minimal photodamage
+
+  # Astronomy domain test cases (photon-starved)
+  astronomy:
+    test_cases:
+      - {scale: 100, read_noise: 3, background: 5.0}    # Bright objects
+      - {scale: 50, read_noise: 2, background: 5.0}     # Faint objects
+      - {scale: 20, read_noise: 2, background: 5.0}     # Very faint objects
+      - {scale: 10, read_noise: 1, background: 5.0}     # Extremely faint
+      - {scale: 5, read_noise: 1, background: 5.0}      # Detection limit
+
+# Metrics configuration (as specified in proposal)
+metrics:
+  # Standard metrics
+  standard:
+    psnr: true
+    ssim: true
+    lpips: true
+    ms_ssim: true
+
+  # Physics metrics (key for validation)
+  physics:
+    chi2_per_pixel: true      # Should be ≈ 1 for correct physics
+    residual_whiteness: true  # Residuals should be white noise
+    bias_analysis: true       # Check for systematic bias
+    poisson_likelihood: true  # Log-likelihood under correct model
+
+  # Domain-specific metrics
+  domain_specific:
+    photography:
+      perceptual_quality: true
+    microscopy:
+      counting_accuracy: true
+      resolution_preservation: true
+    astronomy:
+      source_detection: true
+      photometry_accuracy: true
+
+# Visualization settings
+visualization:
+  create_plots: true
+  plot_format: 'png'
+  dpi: 300
+  style: 'seaborn-v0_8-whitegrid'
+
+  # Plot types to generate
+  plots:
+    scene_comparisons: true      # Individual scene results
+    method_comparison: true      # Overall method comparison
+    scale_analysis: true         # Performance vs photon count
+    physics_validation: true     # Chi-squared analysis
+    summary_table: true          # Numerical results table
+    correlation_analysis: true   # Metric correlations
+    timing_analysis: true        # Performance benchmarks
+
+# Statistical analysis
+statistics:
+  confidence_intervals: true
+  significance_testing: true
+  multiple_comparisons_correction: 'bonferroni'
+  bootstrap_samples: 1000
+
+# Expected results (from proposal)
+expected_results:
+  # Quantitative improvements expected
+  psnr_improvement_over_l2: 2.0  # 2-3 dB gain in <100 photon regime
+  chi2_target: 1.0               # Statistical consistency
+  single_model_drop: 0.5         # <0.5 dB drop vs domain-specific
+
+# Output settings
+output:
+  save_individual_scenes: true
+  save_method_comparisons: true
+  save_summary_statistics: true
+  save_raw_results: true
+  generate_report: true
+
+# Performance settings
+performance:
+  batch_size: 1
+  num_workers: 2
+  memory_limit_gb: 8
+  use_mixed_precision: false
+
+# Logging
+logging:
+  level: 'INFO'
+  log_to_file: true
+  log_file: 'comprehensive_evaluation.log'

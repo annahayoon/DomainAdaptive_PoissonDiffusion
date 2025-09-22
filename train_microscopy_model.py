@@ -211,21 +211,21 @@ class MicroscopyTrainingManager:
         if use_multi_resolution:
             logger.info(f"📈 Using Progressive Multi-Resolution EDM for {domain} domain")
 
-            # Multi-resolution model configuration - Optimized for microscopy
-            # Microscopy typically has lower resolution but requires high precision
+            # Multi-resolution model configuration - UNIFIED BASE ARCHITECTURE
+            # Same architecture for all domains for fair comparison
             default_model_channels = model_kwargs.get(
-                "model_channels", 96
-            )  # Slightly larger for precision
+                "model_channels", 256
+            )  # Unified base architecture
             default_channel_mult = model_kwargs.get(
-                "channel_mult", [1, 2, 3]
-            )  # More gradual scaling
-            default_channel_mult_emb = model_kwargs.get("channel_mult_emb", 4)
+                "channel_mult", [1, 2, 3, 4]
+            )  # Unified base architecture
+            default_channel_mult_emb = model_kwargs.get("channel_mult_emb", 6)
             default_num_blocks = model_kwargs.get(
-                "num_blocks", 4
-            )  # More blocks for precision
+                "num_blocks", 6
+            )  # Unified base architecture
             default_attn_resolutions = model_kwargs.get(
                 "attn_resolutions", [16, 32, 64]
-            )  # Multi-scale attention optimized for patches
+            )  # Unified base architecture
 
             # Use resolution range optimized for microscopy
             min_resolution = 32
@@ -265,18 +265,20 @@ class MicroscopyTrainingManager:
         else:
             logger.info(f"📊 Using Standard EDM for {domain} domain")
 
-            # Default model configuration for microscopy - Optimized for precision
+            # Default model configuration for microscopy - UNIFIED BASE ARCHITECTURE
             default_model_channels = model_kwargs.get(
-                "model_channels", 96
-            )  # Slightly larger
+                "model_channels", 256
+            )  # Unified base architecture
             default_channel_mult = model_kwargs.get(
-                "channel_mult", [1, 2, 3]
-            )  # More gradual
-            default_channel_mult_emb = model_kwargs.get("channel_mult_emb", 4)
-            default_num_blocks = model_kwargs.get("num_blocks", 4)  # More blocks
+                "channel_mult", [1, 2, 3, 4]
+            )  # Unified base architecture
+            default_channel_mult_emb = model_kwargs.get("channel_mult_emb", 6)
+            default_num_blocks = model_kwargs.get(
+                "num_blocks", 6
+            )  # Unified base architecture
             default_attn_resolutions = model_kwargs.get(
                 "attn_resolutions", [16, 32, 64]
-            )  # Multi-scale optimized for patches
+            )  # Unified base architecture
 
             # Use resolution optimized for microscopy
             img_resolution = 128 if default_model_channels >= 96 else 64
@@ -650,7 +652,13 @@ def main():
     parser.add_argument(
         "--epochs", type=int, default=150, help="Number of training epochs"
     )
-    parser.add_argument("--batch_size", type=int, default=4, help="Training batch size")
+    parser.add_argument(
+        "--max_steps",
+        type=int,
+        default=150000,
+        help="Maximum training steps (overrides epochs if set)",
+    )
+    parser.add_argument("--batch_size", type=int, default=8, help="Training batch size")
     parser.add_argument(
         "--learning_rate",
         type=float,
@@ -674,18 +682,27 @@ def main():
         help="Number of warmup steps (will be converted to epochs)",
     )
     parser.add_argument(
-        "--val_frequency", type=int, default=3, help="Validation frequency in epochs"
+        "--val_frequency",
+        type=int,
+        default=3,
+        help="Validation frequency in epochs (ignored if val_frequency_steps is set)",
+    )
+    parser.add_argument(
+        "--val_frequency_steps",
+        type=int,
+        default=None,
+        help="Validation frequency in training steps (overrides val_frequency if set)",
     )
 
     # Model arguments
     parser.add_argument(
         "--model_channels",
         type=int,
-        default=96,
-        help="Number of model channels (optimized for microscopy)",
+        default=256,
+        help="Number of model channels (unified base architecture)",
     )
     parser.add_argument(
-        "--num_blocks", type=int, default=4, help="Number of model blocks"
+        "--num_blocks", type=int, default=6, help="Number of model blocks"
     )
     parser.add_argument(
         "--multi_resolution",
@@ -754,6 +771,13 @@ def main():
         help="Enable mixed precision training",
     )
     parser.add_argument(
+        "--gradient_checkpointing",
+        type=str,
+        choices=["true", "false"],
+        default="false",
+        help="Enable gradient checkpointing to save memory (default: false)",
+    )
+    parser.add_argument(
         "--num_workers", type=int, default=4, help="Number of data loading workers"
     )
     parser.add_argument(
@@ -762,6 +786,12 @@ def main():
         default="true",
         choices=["true", "false"],
         help="Pin memory for faster GPU transfer",
+    )
+    parser.add_argument(
+        "--prefetch_factor",
+        type=int,
+        default=2,
+        help="Number of batches to prefetch (0 to disable)",
     )
 
     # Checkpointing arguments
@@ -790,6 +820,57 @@ def main():
         help="Gradient clipping norm threshold (conservative)",
     )
 
+    # Advanced checkpointing arguments
+    parser.add_argument(
+        "--max_checkpoints",
+        type=int,
+        default=7,
+        help="Maximum number of checkpoints to keep",
+    )
+    parser.add_argument(
+        "--save_best_model",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+        help="Save the best model based on validation metrics",
+    )
+    parser.add_argument(
+        "--save_optimizer_state",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+        help="Save optimizer state in checkpoints",
+    )
+    parser.add_argument(
+        "--checkpoint_metric",
+        type=str,
+        default="val_loss",
+        help="Metric to monitor for best model",
+    )
+    parser.add_argument(
+        "--checkpoint_mode",
+        type=str,
+        default="min",
+        choices=["min", "max"],
+        help="Mode for checkpoint metric (min for loss, max for accuracy)",
+    )
+    parser.add_argument(
+        "--resume_from_best",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help="Resume training from best checkpoint instead of latest",
+    )
+
+    # DDP optimization arguments
+    parser.add_argument(
+        "--ddp_find_unused_parameters",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help="Find unused parameters in DDP (slower but sometimes necessary)",
+    )
+
     # Testing arguments
     parser.add_argument(
         "--max_files",
@@ -806,6 +887,10 @@ def main():
     # Convert string boolean arguments to actual booleans
     args.mixed_precision = args.mixed_precision.lower() == "true"
     args.pin_memory = args.pin_memory.lower() == "true"
+    args.save_best_model = args.save_best_model.lower() == "true"
+    args.save_optimizer_state = args.save_optimizer_state.lower() == "true"
+    args.resume_from_best = args.resume_from_best.lower() == "true"
+    args.ddp_find_unused_parameters = args.ddp_find_unused_parameters.lower() == "true"
 
     # Initialize training manager
     logger.info("🚀 INITIALIZING MICROSCOPY TRAINING")

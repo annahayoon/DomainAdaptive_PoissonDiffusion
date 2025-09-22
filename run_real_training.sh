@@ -50,9 +50,10 @@ cd /home/jilab/Jae && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split
     --attn_resolutions 8 16 32 \\
     --output_dir \"results/photography_optimized_$(date +%Y%m%d_%H%M%S)\" \\
     --device cuda \\
-    --mixed_precision true \\
+    --mixed_precision false \\
     --gradient_checkpointing true \\
-    --learning_rate 1e-5 \\
+    --learning_rate 5e-6 \\
+    --gradient_clip_norm 0.5 \\
     --num_workers 4 \\
     --pin_memory true \\
     --seed 42 \\
@@ -64,7 +65,11 @@ cd /home/jilab/Jae && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split
     --checkpoint_metric val_loss \
     --checkpoint_mode min \
     --resume_from_best false \
-    --gradient_clip_norm 1.0
+    --loss_type poisson_gaussian \
+    --use_exact_likelihood false \
+    --warmup_epochs 2 \
+    --log_frequency 50 \
+    --val_frequency_steps 500
 " Enter
 
 # Split window for monitoring
@@ -74,27 +79,30 @@ tmux split-window -h -t poisson_training
 tmux send-keys -t poisson_training:0.1 "
 cd /home/jilab/Jae && python -c '
 import time, torch, psutil, os
-print(\"A40 GPU Training Monitor - OPTIMIZED\")
+print(\"A40 GPU Training Monitor - STABLE\")
 print(\"=\" * 50)
 print(f\"Enhanced Model: 810M parameters (research-level)\")
 print(f\"Architecture: 256ch, 6 blocks, multi-scale attention\")
 print(f\"Effective Batch: 4 (1 physical x 4 grad acc)\")
-print(f\"Mixed Precision: TRUE\")
+print(f\"Mixed Precision: FALSE (stability prioritized)\")
 print(f\"Gradient Checkpointing: TRUE (memory optimized)\")
-print(f\"Gradient Clipping: 1.0\")
-print(f\"Learning Rate: 1e-5 (scaled for larger batch)\")
+print(f\"Gradient Clipping: 0.5 (aggressive for stability)\")
+print(f\"Learning Rate: 5e-6 (reduced for stability)\")
 print(f\"Checkpointing: Every 800 steps (frequent)\")
 print(f\"Early Stopping: 400 steps patience\")
 print(f\"Training: 25 epochs (100K steps)\")
-print(f\"Expected time: ~7 hours (vs 27 hours unoptimized)\")
+print(f\"Expected time: ~10-12 hours (stable convergence)\")
 print(\"=\" * 50)
 print()
-print(\"🚀 OPTIMIZATIONS APPLIED:\")
-print(\"   • ENABLED mixed precision + gradient checkpointing (2x speedup!)\")
-print(\"   • Increased batch size to 2 (safe with 41% memory)\")
-print(\"   • Scaled learning rate to 1e-5\")
+print(\"🔧 STABILITY FIXES APPLIED:\")
+print(\"   • DISABLED mixed precision (prevents NaN in physics loss)\")
+print(\"   • Reduced learning rate to 5e-6 (stable convergence)\")
+print(\"   • Increased gradient clipping to 0.5 (aggressive)\")
+print(\"   • Using approximate likelihood (more stable)\")
+print(\"   • Added NaN gradient protection (torch.nan_to_num)\")
+print(\"   • Added warmup epochs (2) for gradual training start\")
+print(\"   • Enhanced numerical stability in loss functions\")
 print(\"   • 4 workers for better data loading\")
-print(\"   • Will complete training in ~7 hours (much faster!)\")
 print(\"=\" * 50)
 
 def format_bytes(bytes):
@@ -142,23 +150,25 @@ while True:
     echo "To attach: tmux attach -t poisson_training"
     echo "TensorBoard will be available once training starts"
     echo ""
-    echo "=== OPTIMIZED SINGLE GPU TRAINING ==="
+    echo "=== STABLE SINGLE GPU TRAINING ==="
     echo "   - Model: 810M parameters (research-level)"
     echo "   - Architecture: 256 channels, 6 blocks, multi-scale attention"
     echo "   - Batch size: 1 (with 4x gradient accumulation)"
     echo "   - Training: 25 epochs (100K steps)"
-    echo "   - Mixed precision: ENABLED + gradient checkpointing (2x speedup!)"
-    echo "   - Learning rate: 1e-5 (scaled for batch size)"
+    echo "   - Mixed precision: DISABLED (stability prioritized)"
+    echo "   - Learning rate: 5e-6 (stable convergence)"
     echo ""
-    echo "Memory usage: ~18-20GB (40-43% of A40's 46GB)"
-    echo "Expected duration: ~7 hours (4x faster than original!)"
+    echo "Memory usage: ~20-25GB (43-54% of A40's 46GB)"
+    echo "Expected duration: ~10-12 hours (stable convergence)"
     echo ""
-    echo "🚀 KEY OPTIMIZATIONS:"
-    echo "   - Mixed precision enabled (2x speedup)"
-    echo "   - Batch size doubled (safe with 41% memory usage)"
-    echo "   - Learning rate scaled appropriately"
-    echo "   - 4 workers for better data loading"
-    echo "   - Training 2x more epochs in half the time!"
+    echo "🔧 STABILITY FIXES APPLIED:"
+    echo "   - Mixed precision disabled (prevents NaN in physics loss)"
+    echo "   - Learning rate reduced to 5e-6 (stable convergence)"
+    echo "   - Gradient clipping increased to 0.5 (aggressive)"
+    echo "   - Using approximate likelihood (more stable)"
+    echo "   - Added NaN gradient protection (torch.nan_to_num)"
+    echo "   - Added warmup epochs (2) for gradual training start"
+    echo "   - Enhanced numerical stability in loss functions"
     echo ""
     echo "After STABLE training: Scale to 4 GPUs with conservative batch sizes"
     echo ""

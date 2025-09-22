@@ -22,6 +22,10 @@ Requirements:
 import argparse
 import json
 import logging
+
+# CRITICAL FIX: Set multiprocessing start method FIRST for HPC compatibility
+# This must be done before importing torch to fix DataLoader num_workers > 0 crashes
+import multiprocessing as mp
 import os
 import sys
 import time
@@ -29,13 +33,96 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
+
+print(f"[{__name__}] Setting up multiprocessing for HPC compatibility...")
+print(f"[{__name__}] Python version: {sys.version}")
+print(f"[{__name__}] Current working directory: {os.getcwd()}")
+
+# Set multiprocessing start method to spawn for HPC/SLURM compatibility
+try:
+    current_method = mp.get_start_method(allow_none=True)
+    print(f"[{__name__}] Current multiprocessing method: {current_method}")
+
+    # Force spawn method for HPC compatibility
+    mp.set_start_method("spawn", force=True)
+    new_method = mp.get_start_method()
+    print(
+        f"[{__name__}] ✅ Successfully set multiprocessing start method to: {new_method}"
+    )
+
+    # Verify it's actually spawn
+    if new_method != "spawn":
+        print(f"[{__name__}] ❌ ERROR: Failed to set spawn method, got: {new_method}")
+        sys.exit(1)
+
+except RuntimeError as e:
+    print(f"[{__name__}] ⚠️  Could not set multiprocessing start method: {e}")
+    print(f"[{__name__}] Current method: {mp.get_start_method()}")
+    # Don't exit, but log the issue
+except Exception as e:
+    print(f"[{__name__}] ❌ Unexpected error setting multiprocessing method: {e}")
+    sys.exit(1)
+
 import torch
-import torch.multiprocessing as mp
+import torch.multiprocessing as torch_mp
 import torch.nn as nn
+
+# Additional multiprocessing verification
+print(f"[{__name__}] Verifying multiprocessing setup...")
+print(
+    f"[{__name__}] PyTorch multiprocessing start method: {torch_mp.get_start_method()}"
+)
+print(f"[{__name__}] Python multiprocessing start method: {mp.get_start_method()}")
+
+# Skip multiprocessing test since we're using num_workers=0
+print(f"[{__name__}] Skipping multiprocessing test - using single-threaded DataLoader")
+
+# Initialize distributed training AFTER multiprocessing setup
+if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+    import torch.distributed as dist
+
+    # Ensure torch multiprocessing uses the same method
+    try:
+        torch_mp.set_start_method("spawn", force=True)
+        print("✅ Set torch multiprocessing start method to 'spawn'")
+    except RuntimeError:
+        print("⚠️  Torch multiprocessing method already set")
+
+    # Initialize distributed process group
+    if not dist.is_initialized():
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        dist.init_process_group(backend=backend, init_method="env://")
+
+        # Set device for this process
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            device = torch.device(f"cuda:{local_rank}")
+        else:
+            device = torch.device("cpu")
+
+        print(
+            f"Distributed training initialized: rank {dist.get_rank()}/{dist.get_world_size()}, device: {device}"
+        )
+    else:
+        print("Distributed training already initialized")
 
 # Add project root to path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
+
+# Configure CUDA memory allocator for HPC compatibility
+# This fixes "pidfd_open syscall not supported" errors on older kernels
+try:
+    import torch
+
+    if torch.cuda.is_available():
+        # Disable expandable segments for HPC systems that don't support pidfd_open
+        torch.cuda.memory._set_allocator_settings("expandable_segments:False")
+        print("✅ Configured CUDA memory allocator for HPC compatibility")
+except Exception as e:
+    print(f"⚠️  Could not configure CUDA memory allocator: {e}")
+    print("   Continuing with default settings...")
 
 from core.error_handlers import ErrorHandler
 from core.logging_config import LoggingManager
@@ -330,6 +417,7 @@ class PhotographyTrainingManager:
         use_multi_resolution: bool = False,
         mixed_precision: bool = True,
         gradient_checkpointing: bool = False,
+        ddp_find_unused_parameters: bool = False,
         **model_kwargs,
     ) -> nn.Module:
         """
@@ -351,12 +439,12 @@ class PhotographyTrainingManager:
         if use_multi_resolution:
             logger.info(f"📈 Using Progressive Multi-Resolution EDM for {domain} domain")
 
-            # Multi-resolution model configuration - Enhanced for research-level performance
-            # Use enhanced configuration when specified, otherwise use memory-optimized defaults
-            default_model_channels = model_kwargs.get("model_channels", 64)
-            default_channel_mult = model_kwargs.get("channel_mult", [1, 2, 2])
-            default_channel_mult_emb = model_kwargs.get("channel_mult_emb", 4)
-            default_num_blocks = model_kwargs.get("num_blocks", 3)
+            # Multi-resolution model configuration - UNIFIED BASE ARCHITECTURE
+            # Same architecture for all domains for fair comparison
+            default_model_channels = model_kwargs.get("model_channels", 256)
+            default_channel_mult = model_kwargs.get("channel_mult", [1, 2, 3, 4])
+            default_channel_mult_emb = model_kwargs.get("channel_mult_emb", 6)
+            default_num_blocks = model_kwargs.get("num_blocks", 6)
             default_attn_resolutions = model_kwargs.get(
                 "attn_resolutions", [16, 32, 64]
             )  # Multi-scale attention optimized for patches
@@ -405,12 +493,12 @@ class PhotographyTrainingManager:
         else:
             logger.info(f"📊 Using Standard EDM for {domain} domain")
 
-            # Default model configuration for photography - Enhanced for research-level performance
-            # Use enhanced configuration when specified, otherwise use memory-optimized defaults
-            default_model_channels = model_kwargs.get("model_channels", 64)
-            default_channel_mult = model_kwargs.get("channel_mult", [1, 2, 2])
-            default_channel_mult_emb = model_kwargs.get("channel_mult_emb", 4)
-            default_num_blocks = model_kwargs.get("num_blocks", 3)
+            # Default model configuration for photography - UNIFIED BASE ARCHITECTURE
+            # Same architecture for all domains for fair comparison
+            default_model_channels = model_kwargs.get("model_channels", 256)
+            default_channel_mult = model_kwargs.get("channel_mult", [1, 2, 3, 4])
+            default_channel_mult_emb = model_kwargs.get("channel_mult_emb", 6)
+            default_num_blocks = model_kwargs.get("num_blocks", 6)
             default_attn_resolutions = model_kwargs.get(
                 "attn_resolutions", [16, 32, 64]
             )  # Multi-scale attention optimized for patches
@@ -528,6 +616,39 @@ class PhotographyTrainingManager:
         logger.info(f"  Trainable parameters: {trainable_params:,}")
         logger.info(f"  Model device: {next(model.parameters()).device}")
 
+        # Wrap model with DistributedDataParallel if in distributed mode
+        if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+            import torch.distributed as dist
+
+            if dist.is_initialized():
+                local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+                logger.info(
+                    f"🔄 Wrapping model with DistributedDataParallel (rank {dist.get_rank()}, local_rank {local_rank})"
+                )
+
+                # Ensure model is on the correct device before wrapping
+                model = model.to(f"cuda:{local_rank}")
+
+                # Wrap with DDP
+                model = torch.nn.parallel.DistributedDataParallel(
+                    model,
+                    device_ids=[local_rank],
+                    output_device=local_rank,
+                    find_unused_parameters=ddp_find_unused_parameters,
+                    # Disable broadcast_buffers for better performance if model doesn't have buffers that need syncing
+                    broadcast_buffers=True,
+                )
+
+                logger.info(f"✅ Model wrapped with DDP on device cuda:{local_rank}")
+                logger.info(f"   find_unused_parameters: {ddp_find_unused_parameters}")
+                logger.info(f"   broadcast_buffers: True")
+            else:
+                logger.warning(
+                    "⚠️  RANK/WORLD_SIZE set but distributed not initialized, using single GPU"
+                )
+        else:
+            logger.info("🔧 Single GPU mode - no DDP wrapping needed")
+
         return model
 
     def create_training_config(
@@ -546,6 +667,7 @@ class PhotographyTrainingManager:
         val_frequency: int = 5,
         val_frequency_steps: Optional[int] = None,
         gradient_clip_norm: float = 1.0,
+        prefetch_factor: int = 2,
         **config_kwargs,
     ) -> MultiDomainTrainingConfig:
         """
@@ -623,6 +745,7 @@ class PhotographyTrainingManager:
             device=self.device,
             mixed_precision=mixed_precision,
             compile_model=False,  # May cause issues with some setups
+            prefetch_factor=prefetch_factor,
             # Multi-domain configuration
             domain_balancing=domain_balancing,
             **config_kwargs,
@@ -783,6 +906,8 @@ if __name__ == "__main__":
             }
 
             # Save results
+            # Ensure output directory exists before saving results
+            self.output_dir.mkdir(parents=True, exist_ok=True)
             results_file = self.output_dir / "training_results.json"
             with open(results_file, "w") as f:
                 json.dump(results, f, indent=2, default=str)
@@ -806,6 +931,8 @@ if __name__ == "__main__":
                 "device": str(self.device),
             }
 
+            # Ensure output directory exists before saving error file
+            self.output_dir.mkdir(parents=True, exist_ok=True)
             error_file = self.output_dir / "training_error.json"
             with open(error_file, "w") as f:
                 json.dump(error_results, f, indent=2, default=str)
@@ -815,31 +942,7 @@ if __name__ == "__main__":
 
 def main():
     """Main training function."""
-    # Initialize distributed training if using torchrun
-    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        import torch.distributed as dist
-
-        # Set multiprocessing start method for distributed training
-        torch.multiprocessing.set_start_method("spawn", force=True)
-
-        # Initialize distributed process group
-        if not dist.is_initialized():
-            backend = "nccl" if torch.cuda.is_available() else "gloo"
-            dist.init_process_group(backend=backend, init_method="env://")
-
-            # Set device for this process
-            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-            if torch.cuda.is_available():
-                torch.cuda.set_device(local_rank)
-                device = torch.device(f"cuda:{local_rank}")
-            else:
-                device = torch.device("cpu")
-
-            print(
-                f"Distributed training initialized: rank {dist.get_rank()}/{dist.get_world_size()}, device: {device}"
-            )
-        else:
-            print("Distributed training already initialized")
+    # Distributed training is already initialized at the top of the script
 
     parser = argparse.ArgumentParser(
         description="Train Poisson-Gaussian diffusion model on photography data"
@@ -860,7 +963,7 @@ def main():
     parser.add_argument(
         "--max_steps",
         type=int,
-        default=None,
+        default=150000,
         help="Maximum training steps (overrides epochs if set)",
     )
     parser.add_argument("--batch_size", type=int, default=4, help="Training batch size")
@@ -898,10 +1001,10 @@ def main():
 
     # Model arguments
     parser.add_argument(
-        "--model_channels", type=int, default=128, help="Number of model channels"
+        "--model_channels", type=int, default=256, help="Number of model channels"
     )
     parser.add_argument(
-        "--num_blocks", type=int, default=4, help="Number of model blocks"
+        "--num_blocks", type=int, default=6, help="Number of model blocks"
     )
     parser.add_argument(
         "--multi_resolution",
@@ -985,6 +1088,12 @@ def main():
         default="true",
         choices=["true", "false"],
         help="Pin memory for faster GPU transfer",
+    )
+    parser.add_argument(
+        "--prefetch_factor",
+        type=int,
+        default=2,
+        help="Number of batches to prefetch (0 to disable)",
     )
 
     # Checkpointing arguments
@@ -1072,7 +1181,9 @@ def main():
         help="Maximum number of files to use (for testing)",
     )
     parser.add_argument(
-        "--quick_test", action="store_true", help="Run quick test with synthetic data"
+        "--quick_test",
+        action="store_true",
+        help="Run quick test with synthetic data (NOT for real training - use only for testing)",
     )
 
     args = parser.parse_args()
@@ -1088,6 +1199,27 @@ def main():
     # Check if we're in distributed training
     is_distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
     is_main_process = not is_distributed or int(os.environ.get("RANK", "0")) == 0
+
+    # Early DDP + worker compatibility check
+    if is_distributed and args.num_workers > 0:
+        logger.info("🔍 Testing DDP + multi-worker compatibility...")
+        try:
+            import torch
+            from torch.utils.data import DataLoader, TensorDataset
+
+            # Quick compatibility test
+            test_dataset = TensorDataset(torch.randn(10, 3, 32, 32))
+            test_loader = DataLoader(
+                test_dataset, batch_size=2, num_workers=1, timeout=5, pin_memory=False
+            )
+            next(iter(test_loader))
+            del test_loader, test_dataset
+            logger.info("✅ DDP + multi-worker compatibility confirmed")
+        except Exception as e:
+            logger.warning(f"⚠️  DDP + multi-worker compatibility test failed: {e}")
+            logger.info(
+                "   Training will use automatic fallback to num_workers=0 if needed"
+            )
 
     # Initialize training manager
     if is_main_process:
@@ -1128,6 +1260,7 @@ def main():
         use_multi_resolution=args.multi_resolution,
         mixed_precision=args.mixed_precision,
         gradient_checkpointing=gradient_checkpointing,
+        ddp_find_unused_parameters=args.ddp_find_unused_parameters,
         **model_kwargs,
     )
 
@@ -1140,6 +1273,33 @@ def main():
             local_rank = int(os.environ.get("LOCAL_RANK", "0"))
 
             # CRITICAL: Fix all dtype issues BEFORE any DDP operations
+            logger.info("🔧 Preparing model for DDP initialization...")
+
+            # Ensure model is in training mode
+            model.train()
+
+            # Ensure all parameters require gradients
+            total_params = 0
+            trainable_params = 0
+            for name, param in model.named_parameters():
+                total_params += 1
+                if param.requires_grad:
+                    trainable_params += 1
+                else:
+                    logger.warning(
+                        f"Parameter {name} does not require gradients, enabling..."
+                    )
+                    param.requires_grad_(True)
+                    trainable_params += 1
+
+            logger.info(
+                f"Model parameters: {total_params} total, {trainable_params} trainable"
+            )
+
+            if trainable_params == 0:
+                logger.error("❌ FATAL: Model has no trainable parameters!")
+                raise RuntimeError("Cannot initialize DDP with no trainable parameters")
+
             try:
                 from fix_model_dtypes import (
                     fix_model_dtypes_comprehensive,
@@ -1162,7 +1322,9 @@ def main():
                 logger.warning(
                     "fix_model_dtypes module not found, attempting manual fix..."
                 )
-                # Manual dtype fix
+                # Manual dtype fix - ensure torch is available in this scope
+                import torch
+
                 for name, param in list(model.named_parameters()):
                     if param.dtype in [
                         torch.int8,
@@ -1195,6 +1357,58 @@ def main():
             # Move model to device AFTER dtype fixes
             device = torch.device(f"cuda:{local_rank}")
             model = model.to(device)
+
+            # Debug: Check model parameters before DDP wrapping
+            total_params = sum(p.numel() for p in model.parameters())
+            trainable_params = sum(
+                p.numel() for p in model.parameters() if p.requires_grad
+            )
+            param_count = len(list(model.parameters()))
+            trainable_count = len([p for p in model.parameters() if p.requires_grad])
+
+            logger.info(f"🔍 Model parameter debug before DDP:")
+            logger.info(f"   Total parameters: {total_params:,}")
+            logger.info(f"   Trainable parameters: {trainable_params:,}")
+            logger.info(f"   Parameter count: {param_count}")
+            logger.info(f"   Trainable parameter count: {trainable_count}")
+
+            if trainable_count == 0:
+                logger.error("❌ CRITICAL: Model has no trainable parameters!")
+                logger.error(
+                    "   This will cause DDP to fail with 'tensors.empty()' error"
+                )
+                logger.error("   Checking model state...")
+
+                # Check if model is in eval mode (which disables gradients)
+                if not model.training:
+                    logger.warning("⚠️  Model is in eval mode, switching to train mode")
+                    model.train()
+                    trainable_count = len(
+                        [p for p in model.parameters() if p.requires_grad]
+                    )
+                    logger.info(
+                        f"   After train(): Trainable parameter count: {trainable_count}"
+                    )
+
+                # If still no trainable parameters, enable gradients manually
+                if trainable_count == 0:
+                    logger.warning("⚠️  Manually enabling gradients for all parameters")
+                    for name, param in model.named_parameters():
+                        if not param.requires_grad:
+                            param.requires_grad = True
+                            logger.info(f"   Enabled gradients for: {name}")
+
+                    trainable_count = len(
+                        [p for p in model.parameters() if p.requires_grad]
+                    )
+                    logger.info(
+                        f"   After manual fix: Trainable parameter count: {trainable_count}"
+                    )
+
+            if trainable_count == 0:
+                logger.error("❌ FATAL: Still no trainable parameters after fixes!")
+                logger.error("   Cannot proceed with DDP training")
+                raise RuntimeError("Model has no trainable parameters for DDP")
 
             # Now try DDP wrapping with fallback options
             try:
@@ -1240,7 +1454,10 @@ def main():
 
     # Create dataset
     if args.quick_test:
-        logger.info("🧪 Running quick test with synthetic data...")
+        logger.warning("🧪 QUICK TEST MODE: Using synthetic data for testing only!")
+        logger.warning(
+            "⚠️  This is NOT real training data - results will not be scientifically valid"
+        )
         # Generate synthetic data for testing
         from scripts.generate_synthetic_data import (
             SyntheticConfig,
@@ -1262,10 +1479,14 @@ def main():
         synthetic_generator.save_dataset(results)
 
         # Use module-level SyntheticDataset class to avoid pickling issues
-
         # Use module-level SyntheticSubset class to avoid pickling issues
-
         dataset = SyntheticDataset(synthetic_config.output_dir, args.target_size)
+
+        # Validate synthetic dataset was created successfully
+        if len(dataset) == 0:
+            logger.error("❌ Failed to create synthetic dataset")
+            logger.error(f"   Output directory: {synthetic_config.output_dir}")
+            raise SystemExit("Synthetic dataset creation failed")
     else:
         # Use real preprocessed data
         logger.info("📁 Loading real preprocessed photography data...")
@@ -1275,12 +1496,34 @@ def main():
             print_training_analysis,
         )
 
-        train_dataset, val_dataset = create_preprocessed_datasets(
-            data_root=args.data_root,
-            domain="photography",
-            max_files=args.max_files,
-            seed=args.seed,
-        )
+        try:
+            train_dataset, val_dataset = create_preprocessed_datasets(
+                data_root=args.data_root,
+                domain="photography",
+                max_files=args.max_files,
+                seed=args.seed,
+            )
+        except Exception as e:
+            logger.error(f"❌ Failed to load real preprocessed data: {e}")
+            logger.error(f"   Expected data directory: {args.data_root}")
+            logger.error(f"   Make sure you have run data preprocessing first:")
+            logger.error(
+                f"     python scripts/preprocess_data.py --data_root {args.data_root}"
+            )
+            raise SystemExit(f"Real data loading failed: {e}")
+
+        # Validate that we have real data (not synthetic fallback)
+        if len(train_dataset) == 0:
+            logger.error("❌ Loaded empty training dataset from real data")
+            logger.error(f"   Data root: {args.data_root}")
+            logger.error("   Check that preprocessed data exists and is not corrupted")
+            raise SystemExit("Empty training dataset - real data loading failed")
+
+        if len(val_dataset) == 0:
+            logger.error("❌ Loaded empty validation dataset from real data")
+            logger.error(f"   Data root: {args.data_root}")
+            logger.error("   Check that preprocessed data exists and is not corrupted")
+            raise SystemExit("Empty validation dataset - real data loading failed")
 
         # Calculate optimal training configuration
         dataset_size = len(train_dataset)
@@ -1290,6 +1533,30 @@ def main():
 
         logger.info("🎯 AUTOMATIC TRAINING CONFIGURATION:")
         print_training_analysis(optimal_config)
+
+        # Final validation: ensure we have sufficient data for training
+        if len(train_dataset) < 10:
+            logger.error("❌ Insufficient training data")
+            logger.error(
+                f"   Training samples: {len(train_dataset)} (minimum recommended: 100)"
+            )
+            logger.error(
+                f"   Validation samples: {len(val_dataset)} (minimum recommended: 20)"
+            )
+            logger.error(
+                "   Real data loading may have failed or data may be corrupted"
+            )
+            raise SystemExit("Insufficient training data for meaningful training")
+
+        if len(val_dataset) < 5:
+            logger.error("❌ Insufficient validation data")
+            logger.error(
+                f"   Validation samples: {len(val_dataset)} (minimum recommended: 20)"
+            )
+            logger.error(
+                "   Real data loading may have failed or data may be corrupted"
+            )
+            raise SystemExit("Insufficient validation data for proper validation")
 
         # Check if training steps are reasonable (diffusion standard)
         current_total_steps = args.epochs * optimal_config["steps_per_epoch"]
@@ -1352,6 +1619,7 @@ def main():
         val_frequency=args.val_frequency,
         val_frequency_steps=args.val_frequency_steps,
         gradient_clip_norm=args.gradient_clip_norm,
+        prefetch_factor=args.prefetch_factor,
     )
 
     # Save configuration (only on main process)

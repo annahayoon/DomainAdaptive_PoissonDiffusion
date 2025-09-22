@@ -1,0 +1,7 @@
+{
+  "error": "Can't pickle local object 'create_astronomy_collate_fn.<locals>.collate_fn'",
+  "training_time_hours": 2.2942622502644858e-05,
+  "failed_epoch": 0,
+  "device": "cuda",
+  "domain": "astronomy"
+}
