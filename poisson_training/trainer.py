@@ -203,8 +203,9 @@ class DeterministicTrainer:
         self.metrics = TrainingMetrics()
         self.error_handler = ErrorHandler()
 
-        # Setup logging
-        self.writer = SummaryWriter(self.config.tensorboard_log_dir)
+        # Setup logging (will be initialized lazily to avoid pickling issues)
+        self.writer = None
+        self._tensorboard_log_dir = self.config.tensorboard_log_dir
 
         # Training state
         self.current_epoch = 0
@@ -251,6 +252,24 @@ class DeterministicTrainer:
     def _create_list(self):
         """Create a list for defaultdict factory (pickle-safe)."""
         return list()
+
+    def _get_writer(self):
+        """Lazily initialize SummaryWriter to avoid pickling issues."""
+        if self.writer is None:
+            self.writer = SummaryWriter(self._tensorboard_log_dir)
+        return self.writer
+
+    def __getstate__(self):
+        """Custom pickle state to handle non-serializable objects."""
+        state = self.__dict__.copy()
+        # Remove unpickleable objects
+        state["writer"] = None  # Will be recreated lazily
+        return state
+
+    def __setstate__(self, state):
+        """Custom unpickle state to restore trainer."""
+        self.__dict__.update(state)
+        # writer will be created lazily when needed
 
     def _setup_device(self) -> torch.device:
         """Setup computation device."""
@@ -567,8 +586,12 @@ class DeterministicTrainer:
 
                     # TensorBoard logging
                     for key, value in loss_dict.items():
-                        self.writer.add_scalar(f"train/{key}", value, self.global_step)
-                    self.writer.add_scalar("train/learning_rate", lr, self.global_step)
+                        self._get_writer().add_scalar(
+                            f"train/{key}", value, self.global_step
+                        )
+                    self._get_writer().add_scalar(
+                        "train/learning_rate", lr, self.global_step
+                    )
 
                 self.global_step += 1
 
@@ -693,7 +716,7 @@ class DeterministicTrainer:
 
         # TensorBoard logging
         for key, value in epoch_avg_losses.items():
-            self.writer.add_scalar(f"val/{key}", value, self.current_epoch)
+            self._get_writer().add_scalar(f"val/{key}", value, self.current_epoch)
 
         return epoch_avg_losses
 
@@ -944,10 +967,10 @@ class DeterministicTrainer:
 
                         # TensorBoard logging
                         for key, value in loss_dict.items():
-                            self.writer.add_scalar(
+                            self._get_writer().add_scalar(
                                 f"train/{key}", value, self.global_step
                             )
-                        self.writer.add_scalar(
+                        self._get_writer().add_scalar(
                             "train/learning_rate", lr, self.global_step
                         )
 
@@ -1163,14 +1186,14 @@ class DeterministicTrainer:
                     break
 
                 # TensorBoard logging
-                self.writer.add_scalar(
+                self._get_writer().add_scalar(
                     "epoch/train_loss", train_losses["total_loss"], epoch
                 )
                 if val_losses:
-                    self.writer.add_scalar(
+                    self._get_writer().add_scalar(
                         "epoch/val_loss", val_losses["total_loss"], epoch
                     )
-                self.writer.add_scalar(
+                self._get_writer().add_scalar(
                     "epoch/learning_rate", self.optimizer.param_groups[0]["lr"], epoch
                 )
 
@@ -1185,7 +1208,8 @@ class DeterministicTrainer:
 
         finally:
             # Final cleanup
-            self.writer.close()
+            if self.writer is not None:
+                self.writer.close()
             logger.info("Training completed")
 
         return dict(self.training_history)
