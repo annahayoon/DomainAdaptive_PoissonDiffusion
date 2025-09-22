@@ -30,7 +30,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 
 from core.error_handlers import ErrorHandler, safe_operation
 from core.exceptions import TrainingError, ValidationError
@@ -42,6 +42,72 @@ from .metrics import TrainingMetrics
 from .trainer import DeterministicTrainer, TrainingConfig
 
 logger = get_logger(__name__)
+
+
+# Module-level functions for multiprocessing compatibility (pickle-safe)
+def _default_collate_fn(
+    batch: List[Dict[str, Any]], domain_balancing_config, domain_encoder
+) -> Dict[str, Any]:
+    """Default collate function that preserves domain information - pickle-safe."""
+    # Standard collation for tensor fields
+    collated = {}
+
+    # Handle tensor fields
+    tensor_fields = [
+        "electrons",
+        "clean",
+        "noisy",
+        "scale",
+        "background",
+        "read_noise",
+    ]
+    for field in tensor_fields:
+        if field in batch[0]:
+            values = [item[field] for item in batch]
+            if isinstance(values[0], torch.Tensor):
+                collated[field] = torch.stack(values)
+            else:
+                collated[field] = torch.tensor(values)
+
+    # Handle metadata fields
+    metadata_fields = ["domain", "filepath", "metadata"]
+    for field in metadata_fields:
+        if field in batch[0]:
+            collated[field] = [item[field] for item in batch]
+
+    # Add domain conditioning if enabled
+    if domain_balancing_config.use_domain_conditioning:
+        collated["domain_conditioning"] = domain_encoder.encode(collated)
+
+    return collated
+
+
+def _default_worker_init_fn(worker_id: int, seed: int = 42):
+    """Default worker initialization function - pickle-safe."""
+    import os
+    import random
+
+    import numpy as np
+    import torch
+
+    try:
+        # Set worker-specific seed for reproducibility
+        worker_seed = seed + worker_id
+        random.seed(worker_seed)
+        np.random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
+
+        # Set worker-specific environment variables
+        os.environ["PYTHONHASHSEED"] = str(worker_seed)
+
+        # Disable CUDA in workers to prevent GPU memory issues
+        if torch.cuda.is_available():
+            torch.cuda.set_device(-1)  # Disable CUDA in workers
+
+        logger.debug(f"Worker {worker_id} initialized with seed {worker_seed}")
+    except Exception as e:
+        logger.error(f"Worker {worker_id} initialization failed: {e}")
+        # Don't re-raise to avoid crashing the entire training
 
 
 @dataclass
@@ -551,64 +617,177 @@ class MultiDomainTrainer(DeterministicTrainer):
                 f"   Initial resolution: {dataset.current_resolution}×{dataset.current_resolution}"
             )
 
-        if is_training and config.domain_balancing.sampling_strategy != "uniform":
-            # Use custom batch sampling for training
+        # DDP + Multi-worker compatibility: Smart worker management with fallback
+        num_workers = config.num_workers
+        try:
+            import os
+            import platform
+
+            # Check environment indicators
+            is_hpc_env = any(
+                env_var in os.environ
+                for env_var in ["SLURM_JOB_ID", "PBS_JOBID", "LSB_JOBID"]
+            )
+            is_distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
+
+            # Check for DDP + worker compatibility issues
+            if is_distributed and num_workers > 0:
+                # Test if DDP + workers work by checking for common failure patterns
+                try:
+                    # Quick test: Try to create a simple DataLoader with workers
+                    test_dataset = TensorDataset(torch.randn(10, 3, 32, 32))
+                    test_loader = DataLoader(
+                        test_dataset,
+                        batch_size=2,
+                        num_workers=1,
+                        timeout=5,  # Short timeout for test
+                        pin_memory=False,  # Disable pin_memory for test
+                    )
+                    # Try to get one batch to test worker initialization
+                    next(iter(test_loader))
+                    del test_loader, test_dataset
+
+                    # If we get here, workers work - use conservative setting
+                    num_workers = min(num_workers, 1)
+                    logger.info(
+                        f"🔄 Distributed training detected, workers compatible, using num_workers={num_workers}"
+                    )
+                except Exception as worker_test_error:
+                    # Workers cause issues - fallback to 0
+                    num_workers = 0
+                    logger.warning(
+                        f"🔄 Distributed training detected, workers incompatible: {worker_test_error}"
+                    )
+                    logger.info(f"   Falling back to num_workers=0 for DDP stability")
+            elif is_distributed:
+                logger.info(
+                    f"🔄 Distributed training detected, num_workers=0 (user choice)"
+                )
+            elif is_hpc_env and num_workers > 0:
+                # HPC single GPU: Use moderate workers
+                num_workers = min(num_workers, 4)
+                logger.info(
+                    f"🖥️  HPC environment detected, using num_workers={num_workers} for compatibility"
+                )
+            else:
+                logger.info(f"🔧 Standard environment, using num_workers={num_workers}")
+
+        except Exception as e:
+            logger.warning(f"Could not check environment: {e}")
+            # Keep original num_workers if detection fails
+
+        # Smart persistent workers: Conservative for DDP stability
+        # CRITICAL: Disable persistent workers for validation to prevent resource leaks
+        use_persistent_workers = (
+            getattr(config, "persistent_workers", True)
+            and num_workers > 0
+            and not is_distributed  # Disable persistent workers for DDP initially
+            and is_training  # Only use persistent workers for training, not validation
+        )
+
+        # Setup DistributedSampler for distributed training
+        sampler = None
+        shuffle = is_training  # Default shuffle for non-distributed
+
+        if is_distributed:
+            import torch.distributed as dist
+            from torch.utils.data.distributed import DistributedSampler
+
+            if dist.is_initialized():
+                sampler = DistributedSampler(
+                    dataset,
+                    num_replicas=dist.get_world_size(),
+                    rank=dist.get_rank(),
+                    shuffle=is_training,
+                    drop_last=is_training,  # Drop last batch for training to ensure consistent batch sizes
+                )
+                shuffle = False  # Don't use shuffle when using DistributedSampler
+
+                logger.info(
+                    f"🔄 Using DistributedSampler (rank {dist.get_rank()}/{dist.get_world_size()})"
+                )
+                logger.info(
+                    f"   Dataset samples per rank: ~{len(dataset) // dist.get_world_size()}"
+                )
+                logger.info(f"   Drop last batch: {is_training}")
+
+        if (
+            is_training
+            and config.domain_balancing.sampling_strategy != "uniform"
+            and not is_distributed
+        ):
+            # Use custom batch sampling for training (single GPU only)
+            # Note: Custom sampling is disabled for distributed training to avoid conflicts with DistributedSampler
+            logger.info("🔧 Using custom domain balancing (single GPU mode)")
+            # Create pickle-safe collate function with bound parameters
+            from functools import partial
+
+            collate_fn = partial(
+                _default_collate_fn,
+                domain_balancing_config=config.domain_balancing,
+                domain_encoder=self.domain_encoder,
+            )
+            worker_init_fn = (
+                partial(_default_worker_init_fn, seed=config.seed)
+                if num_workers > 0
+                else None
+            )
+
             return DataLoader(
                 dataset,
                 batch_size=config.batch_size,
                 shuffle=False,  # We handle sampling manually
-                num_workers=config.num_workers,
+                num_workers=num_workers,  # Use smart-adjusted value
                 pin_memory=config.pin_memory,
-                persistent_workers=getattr(config, "persistent_workers", True),
-                prefetch_factor=getattr(config, "prefetch_factor", 2),
-                collate_fn=self._collate_fn,
+                persistent_workers=use_persistent_workers,
+                prefetch_factor=getattr(config, "prefetch_factor", 2)
+                if num_workers > 0
+                else None,
+                collate_fn=collate_fn,
+                worker_init_fn=worker_init_fn,
+                # Add timeout for worker processes to prevent hanging
+                timeout=30 if num_workers > 0 else 0,
             )
         else:
-            # Standard data loader for validation or uniform sampling
+            # Standard data loader for validation, uniform sampling, or distributed training
+            dataloader_type = "distributed" if is_distributed else "standard"
+            sampling_note = (
+                f"with DistributedSampler" if is_distributed else f"shuffle={shuffle}"
+            )
+            logger.info(f"🔧 Using {dataloader_type} data loader {sampling_note}")
+
+            # Create pickle-safe collate function with bound parameters
+            from functools import partial
+
+            collate_fn = partial(
+                _default_collate_fn,
+                domain_balancing_config=config.domain_balancing,
+                domain_encoder=self.domain_encoder,
+            )
+            worker_init_fn = (
+                partial(_default_worker_init_fn, seed=config.seed)
+                if num_workers > 0
+                else None
+            )
+
             return DataLoader(
                 dataset,
                 batch_size=config.batch_size,
-                shuffle=is_training,
-                num_workers=config.num_workers,
+                shuffle=shuffle,
+                sampler=sampler,  # Use DistributedSampler if distributed
+                num_workers=num_workers,  # Use smart-adjusted value
                 pin_memory=config.pin_memory,
-                persistent_workers=getattr(config, "persistent_workers", True),
-                prefetch_factor=getattr(config, "prefetch_factor", 2),
-                collate_fn=self._collate_fn,
+                persistent_workers=use_persistent_workers,
+                prefetch_factor=getattr(config, "prefetch_factor", 2)
+                if num_workers > 0
+                else None,
+                collate_fn=collate_fn,
+                worker_init_fn=worker_init_fn,
+                # Add timeout for worker processes to prevent hanging
+                timeout=30 if num_workers > 0 else 0,
             )
 
-    def _collate_fn(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Custom collate function that preserves domain information."""
-        # Standard collation for tensor fields
-        collated = {}
-
-        # Handle tensor fields
-        tensor_fields = [
-            "electrons",
-            "clean",
-            "noisy",
-            "scale",
-            "background",
-            "read_noise",
-        ]
-        for field in tensor_fields:
-            if field in batch[0]:
-                values = [item[field] for item in batch]
-                if isinstance(values[0], torch.Tensor):
-                    collated[field] = torch.stack(values)
-                else:
-                    collated[field] = torch.tensor(values)
-
-        # Handle metadata fields
-        metadata_fields = ["domain", "filepath", "metadata"]
-        for field in metadata_fields:
-            if field in batch[0]:
-                collated[field] = [item[field] for item in batch]
-
-        # Add domain conditioning if enabled
-        if self.domain_balancing_config.use_domain_conditioning:
-            collated["domain_conditioning"] = self.domain_encoder.encode(collated)
-
-        return collated
+    # Note: _worker_init_fn and _collate_fn moved to module level for multiprocessing compatibility
 
     def _setup_domain_loss_weights(self) -> Dict[str, float]:
         """Setup domain-specific loss weights."""
@@ -1015,7 +1194,9 @@ class MultiDomainTrainer(DeterministicTrainer):
     def _create_batch_from_indices(self, indices: List[int]) -> Dict[str, Any]:
         """Create batch from dataset indices."""
         batch_items = [self.train_dataloader.dataset[idx] for idx in indices]
-        return self._collate_fn(batch_items)
+        return _default_collate_fn(
+            batch_items, self.domain_balancing_config, self.domain_encoder
+        )
 
     def _compute_domain_aware_loss(
         self, outputs: Dict[str, torch.Tensor], batch: Dict[str, Any]

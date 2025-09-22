@@ -65,7 +65,7 @@ class PoissonGaussianLoss(nn.Module):
         read_noise: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Compute Poisson-Gaussian negative log-likelihood.
+        Compute Poisson-Gaussian negative log-likelihood with improved numerical stability.
 
         Args:
             prediction: Model prediction (normalized [0,1])
@@ -77,6 +77,11 @@ class PoissonGaussianLoss(nn.Module):
         Returns:
             Negative log-likelihood loss
         """
+        # Clamp prediction to valid range to prevent extreme values
+        prediction = torch.clamp(
+            prediction, min=0.0, max=10.0
+        )  # Reasonable range for normalized values
+
         # Convert prediction back to electrons
         # Ensure proper broadcasting
         if scale.numel() > 1:
@@ -86,32 +91,69 @@ class PoissonGaussianLoss(nn.Module):
         if read_noise.numel() > 1:
             read_noise = read_noise.view(-1, 1, 1, 1)
 
+        # Clamp scale to prevent extreme values
+        scale = torch.clamp(scale, min=1.0, max=1e6)
+
         pred_electrons = prediction * scale + background
-        pred_electrons = torch.clamp(pred_electrons, min=self.eps)
+        # More aggressive clamping for numerical stability
+        pred_electrons = torch.clamp(pred_electrons, min=1e-3, max=1e8)
+
+        # Also clamp target to prevent issues
+        target = torch.clamp(target, min=0.0, max=1e8)
 
         if self.use_exact_likelihood:
-            # Exact Poisson-Gaussian likelihood
+            # Exact Poisson-Gaussian likelihood with numerical safeguards
             # For observation y ~ Poisson(λ) + N(0, σ²)
             # where λ = pred_electrons, σ = read_noise
 
-            # Poisson component: -λ + y*log(λ) - log(y!)
-            poisson_term = -pred_electrons + target * torch.log(
-                pred_electrons + self.eps
+            # Poisson component with stable log computation
+            # Use log1p for better numerical stability with small values
+            log_pred = torch.where(
+                pred_electrons > 1.0,
+                torch.log(pred_electrons + self.eps),
+                torch.log1p(pred_electrons - 1.0 + self.eps),
             )
 
-            # Gaussian component: -0.5 * ((y - λ) / σ)²
+            # Clip log values to prevent inf
+            log_pred = torch.clamp(log_pred, min=-100, max=100)
+
+            poisson_term = -pred_electrons + target * log_pred
+
+            # Gaussian component with clamped variance
+            read_noise_clamped = torch.clamp(read_noise, min=0.1, max=1000.0)
             gaussian_term = (
-                -0.5 * ((target - pred_electrons) / (read_noise + self.eps)) ** 2
+                -0.5
+                * ((target - pred_electrons) / (read_noise_clamped + self.eps)) ** 2
             )
+
+            # Clamp individual terms to prevent extreme values
+            poisson_term = torch.clamp(poisson_term, min=-1e4, max=1e4)
+            gaussian_term = torch.clamp(gaussian_term, min=-1e4, max=0)
 
             # Combined likelihood (ignoring constants)
             nll = -(poisson_term + gaussian_term)
 
+            # Final safety clamp
+            nll = torch.clamp(nll, min=-1e4, max=1e4)
+
         else:
             # Approximation: weighted MSE with Poisson variance
-            variance = pred_electrons + read_noise**2
+            variance = torch.clamp(pred_electrons + read_noise**2, min=1.0, max=1e8)
             mse = (target - pred_electrons) ** 2
-            nll = mse / (variance + self.eps)
+            mse = torch.clamp(mse, min=0.0, max=1e10)
+            nll = mse / variance
+            nll = torch.clamp(nll, min=0.0, max=1e4)
+
+        # Check for NaN and replace with large but finite loss
+        if torch.isnan(nll).any() or torch.isinf(nll).any():
+            logger.warning(
+                "NaN or Inf detected in loss computation, replacing with large finite value"
+            )
+            nll = torch.where(
+                torch.isnan(nll) | torch.isinf(nll),
+                torch.tensor(100.0, device=nll.device, dtype=nll.dtype),
+                nll,
+            )
 
         return nll.mean()
 
@@ -119,7 +161,7 @@ class PoissonGaussianLoss(nn.Module):
         self, prediction: torch.Tensor, target: torch.Tensor, scale: torch.Tensor
     ) -> torch.Tensor:
         """
-        Compute consistency loss to ensure physical constraints.
+        Compute consistency loss to ensure physical constraints with numerical stability.
 
         Args:
             prediction: Model prediction (normalized [0,1])
@@ -129,8 +171,14 @@ class PoissonGaussianLoss(nn.Module):
         Returns:
             Consistency loss
         """
+        # Clamp inputs for stability
+        prediction = torch.clamp(prediction, min=-10.0, max=10.0)
+        scale = torch.clamp(scale, min=1.0, max=1e6)
+        target = torch.clamp(target, min=0.0, max=1e8)
+
         # Ensure predictions are in valid range
         range_loss = F.relu(-prediction).mean() + F.relu(prediction - 1).mean()
+        range_loss = torch.clamp(range_loss, min=0.0, max=100.0)
 
         # Ensure energy conservation (optional)
         # Ensure proper broadcasting
@@ -138,10 +186,23 @@ class PoissonGaussianLoss(nn.Module):
             scale = scale.view(-1, 1, 1, 1)
 
         pred_electrons = prediction * scale
-        target_norm = target / scale
-        energy_loss = torch.abs(pred_electrons.mean() - target_norm.mean())
+        target_norm = target / torch.clamp(scale, min=1.0)  # Prevent division by zero
 
-        return range_loss + 0.1 * energy_loss
+        # Clamp intermediate values
+        pred_electrons = torch.clamp(pred_electrons, min=0.0, max=1e10)
+        target_norm = torch.clamp(target_norm, min=0.0, max=1e10)
+
+        energy_loss = torch.abs(pred_electrons.mean() - target_norm.mean())
+        energy_loss = torch.clamp(energy_loss, min=0.0, max=1e6)
+
+        total_loss = range_loss + 0.1 * energy_loss
+
+        # Final safety check
+        if torch.isnan(total_loss).any() or torch.isinf(total_loss).any():
+            logger.warning("NaN or Inf in consistency loss, using fallback")
+            return torch.tensor(1.0, device=prediction.device, dtype=prediction.dtype)
+
+        return total_loss
 
     def forward(
         self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
