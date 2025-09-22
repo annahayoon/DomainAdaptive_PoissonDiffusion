@@ -1,20 +1,28 @@
 # Core ML/Scientific Computing
+# PyTorch with CUDA 12.1 support (compatible with CUDA 12.3 driver)
 torch>=2.0.0
 torchvision>=0.15.0
-numpy>=1.21.0
+torchaudio>=2.0.0
+numpy==1.26.4  # Pinned for PyTorch compatibility (NumPy 2.x causes crashes)
 scipy>=1.7.0
 
 # Image Processing
 Pillow>=9.0.0
 rawpy>=0.18.0
+opencv-python>=4.8.0  # For advanced image processing
+scikit-image>=0.21.0  # For image metrics and analysis
 
 # Astronomy/Scientific Data
 astropy>=5.0.0
+h5py>=3.8.0  # For HDF5 data handling
 
 # Configuration and Utilities
 PyYAML>=6.0
 tqdm>=4.64.0
 psutil>=5.9.0
+omegaconf>=2.3.0  # For configuration management
+lz4>=4.3.0  # For fast compression
+backports.lzma>=0.0.14  # For lzma compression support
 
 # Logging and Monitoring
 tensorboard>=2.10.0
@@ -38,3 +46,6 @@ seaborn>=0.11.0
 # Development utilities
 ipython>=8.0.0
 jupyter>=1.0.0
+
+# HPC and Multi-GPU Training
+# Note: torchrun is built into PyTorch - no additional package needed

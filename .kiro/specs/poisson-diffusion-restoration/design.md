@@ -34,10 +34,11 @@ Denoised(128×128) → Inverse Transform → Original Size → Denormalize → F
    - Physics computed in electron space for correctness
    - Clear conversion via scale parameter s
 
-2. **Fixed Model Resolution**:
-   - All processing at 128×128 for consistency
-   - Reversible transforms handle arbitrary input sizes
-   - Enables single model for all resolutions
+2. **Multi-Resolution Architecture**:
+   - Progressive growing: start with 32×32, grow to 64×64, 96×96, 128×128
+   - Hierarchical multi-scale processing with skip connections
+   - Adaptive resolution selection based on image characteristics
+   - Enables optimal quality-efficiency tradeoffs
 
 3. **No Forward Operator**:
    - Simplified to noise-only (H = Identity)
@@ -288,6 +289,105 @@ class TrainingBatch:
 3. **Scalability**: Test with varying batch sizes and resolutions
 4. **GPU Utilization**: Monitor compute efficiency during training/inference
 
+## Multi-Resolution System Components
+
+### 5. Progressive Growing Architecture
+
+**Purpose**: Enable training and inference at multiple resolutions with progressive quality improvement.
+
+**Core Classes**:
+- `ProgressiveEDM`: Main progressive growing model
+- `ResolutionScheduler`: Manages resolution transitions during training
+- `MultiResDataset`: Handles data loading at multiple resolutions
+- `AdaptiveResolution`: Automatic resolution selection for inference
+
+**Key Interfaces**:
+```python
+class ProgressiveEDM(nn.Module):
+    def __init__(self, min_res: int = 64, max_res: int = 512, num_stages: int = 4)
+    def forward(self, x: Tensor, sigma: Tensor, resolution: int) -> Tensor
+    def grow_resolution(self) -> bool  # Add new resolution stage
+
+class ResolutionScheduler:
+    def __init__(self, schedule: List[Tuple[int, int]])  # (epoch, resolution)
+    def get_current_resolution(self, epoch: int) -> int
+    def should_grow_resolution(self, epoch: int) -> bool
+
+class AdaptiveResolution:
+    def select_resolution(self, image: Tensor, target_quality: str) -> int
+    def get_batch_size_for_resolution(self, resolution: int) -> int
+```
+
+**Progressive Growing Strategy**:
+- **Stage 1**: 32×32 (epochs 0-25) - Fast training, basic features
+- **Stage 2**: 64×64 (epochs 26-50) - Add mid-level features
+- **Stage 3**: 96×96 (epochs 51-75) - Add fine details
+- **Stage 4**: 128×128 (epochs 76-100) - Full resolution processing
+
+### 6. Hierarchical Multi-Scale Processing
+
+**Purpose**: Process images at multiple scales simultaneously for better feature extraction.
+
+**Core Classes**:
+- `MultiScaleEDM`: U-Net style hierarchical processing
+- `ScalePyramid`: Creates and manages multi-scale image pyramids
+- `FeatureFusion`: Combines features across different scales
+- `MultiScaleConditioning`: Scale-aware conditioning vectors
+
+**Key Interfaces**:
+```python
+class MultiScaleEDM(nn.Module):
+    def __init__(self, scales: List[int] = [32, 64, 96, 128])
+    def forward(self, x: Tensor, sigma: Tensor, scale_mask: Tensor) -> Tensor
+    def extract_multiscale_features(self, x: Tensor) -> Dict[int, Tensor]
+
+class ScalePyramid:
+    def build_pyramid(self, x: Tensor) -> Dict[int, Tensor]
+    def reconstruct_from_pyramid(self, pyramid: Dict[int, Tensor]) -> Tensor
+
+class FeatureFusion:
+    def fuse_features(self, features: Dict[int, Tensor]) -> Tensor
+    def upsample_with_skip(self, x: Tensor, skip: Tensor) -> Tensor
+```
+
+**Multi-Scale Feature Processing**:
+- **Encoder**: Downsample through scales (128→96→64→32)
+- **Decoder**: Upsample with skip connections (32→64→96→128)
+- **Feature Fusion**: Combine features from all scales at each level
+- **Scale-Aware Conditioning**: Different conditioning for different scales
+
+### 7. Adaptive Resolution Pipeline
+
+**Purpose**: Automatically select optimal resolution based on image characteristics and computational constraints.
+
+**Core Classes**:
+- `ResolutionManager`: Orchestrates resolution selection and processing
+- `QualityEstimator`: Estimates expected quality improvement per resolution
+- `MemoryPlanner`: Plans memory usage across different resolutions
+- `BatchScheduler`: Dynamic batch sizing for different resolutions
+
+**Key Interfaces**:
+```python
+class ResolutionManager:
+    def process_adaptive(self, images: List[Tensor], constraints: Dict) -> List[Tensor]
+    def select_optimal_resolution(self, image: Tensor, constraints: Dict) -> int
+    def get_processing_plan(self, images: List[Tensor]) -> ProcessingPlan
+
+@dataclass
+class ProcessingConstraints:
+    max_memory_gb: float = 8.0
+    target_time_sec: float = 30.0
+    min_resolution: int = 64
+    max_resolution: int = 512
+    quality_preference: str = "balanced"  # speed, balanced, quality
+```
+
+**Adaptive Processing Algorithm**:
+1. **Analyze Input**: Estimate noise level, detail content, size
+2. **Evaluate Options**: Test different resolutions for quality/speed tradeoff
+3. **Select Optimal**: Choose resolution maximizing quality within constraints
+4. **Process Efficiently**: Use hierarchical processing when beneficial
+
 ## Implementation Priorities
 
 ### Phase 1: Core Infrastructure (Weeks 1-2)
@@ -308,7 +408,13 @@ class TrainingBatch:
 - Baseline implementations
 - Performance optimization
 
-### Phase 4: Validation and Polish (Week 7-8)
+### Phase 4: Multi-Resolution Implementation (Weeks 7-8)
+- Progressive growing architecture
+- Hierarchical multi-scale processing
+- Adaptive resolution pipeline
+- Multi-resolution training framework
+
+### Phase 5: Validation and Polish (Weeks 9-10)
 - Scientific validation on real data
 - Documentation and examples
 - Performance benchmarking

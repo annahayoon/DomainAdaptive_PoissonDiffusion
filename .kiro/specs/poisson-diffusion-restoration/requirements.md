@@ -55,18 +55,27 @@ The solution combines physically-correct likelihood guidance with diffusion mode
 | Microscopy | 1-1,000 | 0.1-1 μm | 12-16 bit | Photobleaching |
 | Astronomy | 0.1-100 | 0.01-1" | 16-32 bit | Cosmic rays |
 
-### Requirement 3: Reversible Scale and Metadata Preservation
+### Requirement 3: Multi-Resolution Processing and Metadata Preservation
 
-**User Story:** As a scientist requiring quantitative analysis, I want the system to perfectly reconstruct images to their original resolution while preserving all physical calibration data.
+**User Story:** As a scientist requiring quantitative analysis, I want the system to process images at optimal resolutions while preserving all physical calibration data and enabling perfect reconstruction.
 
 #### Acceptance Criteria
 
-1. **Arbitrary Input Sizes**: WHEN processing images of any input size THEN the system SHALL transform to model resolution (128×128) using bilinear interpolation
-2. **Perfect Reconstruction**: WHEN reconstructing processed images THEN the system SHALL restore exact original dimensions with <1e-5 relative error
-3. **Metadata Tracking**: The system SHALL track complete transformation metadata including: scale_factor, crop_bbox, pad_amounts, original dimensions
-4. **Physical Units**: WHEN handling different pixel scales THEN the system SHALL preserve and correctly transform physical units
-5. **Serialization Support**: WHEN saving/loading metadata THEN the system SHALL support JSON serialization for reproducibility
-6. **Boundary Handling**: WHEN padding is required THEN the system SHALL use reflection padding to minimize boundary artifacts
+1. **Progressive Resolution Training**: WHEN training the model THEN the system SHALL support progressive growing from 64×64 to 512×512 resolution in stages
+2. **Adaptive Resolution Selection**: WHEN processing images THEN the system SHALL automatically select optimal resolution based on image characteristics and computational constraints
+3. **Hierarchical Multi-Scale Processing**: WHEN processing high-resolution images THEN the system SHALL use U-Net style hierarchical processing with skip connections across scales
+4. **Perfect Reconstruction**: WHEN reconstructing processed images THEN the system SHALL restore exact original dimensions with <1e-5 relative error
+5. **Metadata Tracking**: The system SHALL track complete transformation metadata including: scale_factor, crop_bbox, pad_amounts, original dimensions, processing resolution
+6. **Physical Units**: WHEN handling different pixel scales THEN the system SHALL preserve and correctly transform physical units across all resolution levels
+7. **Serialization Support**: WHEN saving/loading metadata THEN the system SHALL support JSON serialization for reproducibility
+8. **Boundary Handling**: WHEN padding is required THEN the system SHALL use reflection padding to minimize boundary artifacts at all resolution levels
+
+#### Multi-Resolution Specifications
+- **Supported Resolutions**: 32×32, 64×64, 96×96, 128×128
+- **Progressive Growing**: 4-stage training (25 epochs per stage)
+- **Adaptive Selection**: Automatic resolution choice based on noise level and detail content
+- **Memory Management**: Dynamic batch sizing per resolution level
+- **Quality Scaling**: PSNR improvement of 1-2 dB per resolution stage
 
 #### Metadata Structure
 ```python
@@ -92,18 +101,28 @@ class ImageMetadata:
     exposure_time: Optional[float]
 ```
 
-### Requirement 4: Diffusion Model Integration
+### Requirement 4: Multi-Resolution Diffusion Model Integration
 
-**User Story:** As a developer implementing the restoration pipeline, I want a diffusion model that incorporates physics-based guidance during sampling for optimal restoration quality.
+**User Story:** As a developer implementing the restoration pipeline, I want a multi-resolution diffusion model that can process images at optimal resolutions while incorporating physics-based guidance for optimal restoration quality.
 
 #### Acceptance Criteria
 
-1. **Model Architecture**: WHEN implementing the diffusion model THEN the system SHALL use EDM v-parameterization with conditional architecture
-2. **Guidance Integration**: WHEN performing guided sampling THEN the system SHALL incorporate Poisson-Gaussian likelihood gradients at each denoising step where σ > 0.01
-3. **Guidance Scheduling**: WHEN computing guidance weights THEN the system SHALL support configurable schedules: σ² (default), linear, or constant
-4. **Sampling Algorithm**: The system SHALL implement the EDM sampling schedule with 18 steps by default (configurable 5-50)
-5. **Stability Control**: WHEN guidance gradients exceed threshold THEN the system SHALL clip values to [-10, 10] for numerical stability
-6. **Prior-Only Mode**: WHEN guidance_weight=0 THEN the system SHALL fall back to pure prior sampling
+1. **Progressive Growing Architecture**: WHEN training the model THEN the system SHALL support progressive growing from low to high resolution in discrete stages
+2. **Multi-Scale Feature Processing**: WHEN processing images THEN the system SHALL use hierarchical feature extraction with skip connections across resolution levels
+3. **Adaptive Resolution Selection**: WHEN inferring optimal processing THEN the system SHALL automatically select resolution based on image characteristics and computational constraints
+4. **Model Architecture**: WHEN implementing the diffusion model THEN the system SHALL use EDM v-parameterization with resolution-conditioned architecture
+5. **Guidance Integration**: WHEN performing guided sampling THEN the system SHALL incorporate Poisson-Gaussian likelihood gradients at each denoising step where σ > 0.01, with resolution-aware weighting
+6. **Guidance Scheduling**: WHEN computing guidance weights THEN the system SHALL support configurable schedules: σ² (default), linear, or constant, with resolution-specific parameters
+7. **Sampling Algorithm**: The system SHALL implement the EDM sampling schedule with 18 steps by default (configurable 5-50), supporting variable steps per resolution
+8. **Stability Control**: WHEN guidance gradients exceed threshold THEN the system SHALL clip values to [-10, 10] for numerical stability across all resolution levels
+9. **Prior-Only Mode**: WHEN guidance_weight=0 THEN the system SHALL fall back to pure prior sampling at the selected resolution
+
+#### Multi-Resolution Specifications
+- **Resolution Stages**: 32×32 → 64×64 → 96×96 → 128×128
+- **Progressive Training**: 25 epochs per resolution stage
+- **Feature Hierarchy**: Skip connections and feature fusion across scales
+- **Memory Efficiency**: Dynamic batch sizing based on resolution
+- **Quality Scaling**: 1-2 dB PSNR improvement per resolution stage
 
 #### EDM Sampling Parameters
 - Default steps: 18
@@ -157,13 +176,23 @@ class ImageMetadata:
 5. **CPU Fallback**: WHEN GPU is unavailable THEN the system SHALL automatically fall back to CPU processing with appropriate warnings
 6. **Progressive Processing**: WHEN dealing with very large images THEN the system SHALL support progressive refinement from coarse to fine
 
-#### Performance Targets
-| Resolution | GPU Memory | Inference Time | Mode |
-|------------|------------|----------------|------|
-| 512×512 | 4 GB | 2-3 sec | Full |
-| 1024×1024 | 6 GB | 8-12 sec | Full |
-| 2048×2048 | 8 GB | 15-25 sec | Tiled |
-| 4096×4096 | 8 GB | 40-60 sec | Tiled |
+#### Multi-Resolution Performance Targets
+| Input Size | Processing Resolution | GPU Memory | Inference Time | Quality Level |
+|------------|---------------------|------------|----------------|---------------|
+| 512×512 | 128×128 | 2 GB | 1-2 sec | High |
+| 1024×1024 | 128×128 | 2 GB | 2-4 sec | High |
+| 1024×1024 | 256×256 | 4 GB | 4-8 sec | Very High |
+| 2048×2048 | 128×128 | 2 GB | 4-8 sec | High |
+| 2048×2048 | 256×256 | 4 GB | 8-15 sec | Very High |
+| 4096×4096 | 128×128 | 2 GB | 8-15 sec | High |
+| 4096×4096 | 256×256 | 4 GB | 15-30 sec | Very High |
+| 4096×4096 | 512×512 | 8 GB | 30-60 sec | Maximum |
+
+#### Adaptive Processing Features
+- **Automatic Resolution Selection**: Choose optimal resolution based on available memory and quality requirements
+- **Progressive Refinement**: Option to start at low resolution and progressively refine
+- **Batch Size Adaptation**: Dynamic batch sizing based on resolution and available memory
+- **Quality-Efficiency Tradeoff**: Configurable balance between quality and speed
 
 ### Requirement 8: Scientific Validation and Reproducibility
 

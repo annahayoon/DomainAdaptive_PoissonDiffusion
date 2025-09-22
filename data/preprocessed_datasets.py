@@ -50,6 +50,9 @@ class PreprocessedPriorDataset(Dataset):
         self.split = split
         self.max_files = max_files
 
+        # Load domain calibration parameters
+        self.domain_params = self._load_domain_calibration()
+
         # Find all .pt files in the prior_clean directory
         prior_dir = self.data_root / "prior_clean" / domain / split
         if not prior_dir.exists():
@@ -61,14 +64,22 @@ class PreprocessedPriorDataset(Dataset):
             raise ValueError(f"No .pt files found in {prior_dir}")
 
         # Filter out corrupted files
-        self.files = []
-        for file_path in all_files:
-            try:
-                # Quick test load to check if file is valid
-                torch.load(file_path, map_location="cpu", weights_only=False)
-                self.files.append(file_path)
-            except Exception as e:
-                logger.warning(f"Skipping corrupted file {file_path}: {e}")
+        # PERFORMANCE FIX: Skip validation for large datasets (87K+ files)
+        # Validation takes ~30 minutes for 87K files. Trust preprocessed data quality.
+        if len(all_files) > 50000:
+            logger.info(
+                f"Large dataset detected ({len(all_files)} files). Skipping validation for performance."
+            )
+            self.files = all_files
+        else:
+            self.files = []
+            for file_path in all_files:
+                try:
+                    # Quick test load to check if file is valid
+                    torch.load(file_path, map_location="cpu", weights_only=False)
+                    self.files.append(file_path)
+                except Exception as e:
+                    logger.warning(f"Skipping corrupted file {file_path}: {e}")
 
         if not self.files:
             raise ValueError(f"No valid .pt files found in {prior_dir}")
@@ -81,6 +92,75 @@ class PreprocessedPriorDataset(Dataset):
         logger.info(
             f"Loaded {len(self.files)} valid preprocessed {domain} {split} files (filtered from {len(all_files)} total)"
         )
+        logger.info(f"Domain parameters: {self.domain_params}")
+
+    def _load_domain_calibration(self) -> Dict[str, float]:
+        """
+        Load domain calibration parameters from config files.
+
+        Returns:
+            Dictionary containing domain parameters (scale, read_noise, background, gain)
+        """
+        # Map domain names to calibration files
+        domain_calibrations = {
+            "photography": "photography_sony_a7s.json",
+            "microscopy": "microscopy_scientific_cmos.json",
+            "astronomy": "astronomy_hubble_wfc3.json",
+        }
+
+        if self.domain not in domain_calibrations:
+            logger.warning(
+                f"No calibration file found for domain '{self.domain}', using defaults"
+            )
+            return {
+                "scale": 1000.0,
+                "read_noise": 5.0,
+                "background": 100.0,
+                "gain": 1.0,
+            }
+
+        calib_file = (
+            Path(__file__).parent.parent
+            / "configs"
+            / "calibrations"
+            / domain_calibrations[self.domain]
+        )
+
+        if not calib_file.exists():
+            logger.warning(f"Calibration file not found: {calib_file}, using defaults")
+            return {
+                "scale": 1000.0,
+                "read_noise": 5.0,
+                "background": 100.0,
+                "gain": 1.0,
+            }
+
+        try:
+            with open(calib_file, "r") as f:
+                calib_data = json.load(f)
+
+            calib = calib_data.get("calibration", {})
+
+            # Extract key parameters for domain conditioning
+            domain_params = {
+                "scale": calib.get(
+                    "white_level", 1000.0
+                ),  # Use white_level as scale proxy
+                "read_noise": calib.get("read_noise", 5.0),
+                "background": calib.get("black_level", 100.0),
+                "gain": calib.get("gain", 1.0),
+            }
+
+            return domain_params
+
+        except Exception as e:
+            logger.error(f"Error loading calibration file {calib_file}: {e}")
+            return {
+                "scale": 1000.0,
+                "read_noise": 5.0,
+                "background": 100.0,
+                "gain": 1.0,
+            }
 
     def __len__(self) -> int:
         return len(self.files)
@@ -105,10 +185,8 @@ class PreprocessedPriorDataset(Dataset):
             # Extract clean image
             clean = data["clean_norm"]  # [4, 128, 128] for photography
 
-            # Convert 4-channel RGGB to 1-channel grayscale for model compatibility
-            # Simple approach: average the 4 channels
-            if clean.shape[0] == 4:
-                clean = clean.mean(dim=0, keepdim=True)  # [1, 128, 128]
+            # Keep 4-channel RGGB format for diffusion model training
+            # The model now supports 4-channel input
 
             # For diffusion training, we need to add noise to create noisy version
             # For now, use clean as both clean and noisy (noise will be added in trainer)
@@ -118,24 +196,40 @@ class PreprocessedPriorDataset(Dataset):
             noise_std = 0.1
             noisy = noisy + torch.randn_like(clean) * noise_std
 
+            # Get domain parameters
+            domain_params = self.domain_params.copy()
+            domain_params["domain"] = self.domain
+
             return {
                 "clean": clean.float(),
                 "noisy": noisy.float(),
                 "electrons": clean.float(),  # Target for loss function
                 "domain": torch.tensor([data.get("domain_id", 0)]),
                 "metadata": data.get("metadata", {}),
+                "domain_params": domain_params,  # Domain calibration parameters
             }
 
         except Exception as e:
             logger.warning(f"Error loading {file_path}: {e}")
             # Return a dummy sample instead of recursion to prevent infinite loops
             return {
-                "clean": torch.zeros(1, 128, 128, dtype=torch.float32),
-                "noisy": torch.zeros(1, 128, 128, dtype=torch.float32),
-                "electrons": torch.zeros(1, 128, 128, dtype=torch.float32),
+                "clean": torch.zeros(4, 128, 128, dtype=torch.float32),
+                "noisy": torch.zeros(4, 128, 128, dtype=torch.float32),
+                "electrons": torch.zeros(4, 128, 128, dtype=torch.float32),
                 "domain": torch.tensor([0]),
                 "metadata": {"corrupted": True, "original_idx": idx},
+                "domain_params": self.domain_params.copy(),
             }
+
+    def __getstate__(self):
+        """Support for pickling in multiprocessing."""
+        state = self.__dict__.copy()
+        # The logger is a module-level variable, so it should be fine
+        return state
+
+    def __setstate__(self, state):
+        """Support for unpickling in multiprocessing."""
+        self.__dict__.update(state)
 
 
 class PreprocessedMultiDomainDataset:
@@ -206,6 +300,149 @@ class PreprocessedMultiDomainDataset:
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         return self.combined_dataset[idx]
 
+    def __getstate__(self):
+        """Support for pickling in multiprocessing."""
+        state = self.__dict__.copy()
+        return state
+
+    def __setstate__(self, state):
+        """Support for unpickling in multiprocessing."""
+        self.__dict__.update(state)
+
+
+class CustomPreprocessedDataset(PreprocessedPriorDataset):
+    """Custom preprocessed dataset with specific file lists."""
+
+    def __init__(self, files, domain, split, data_root=None):
+        # Use the parent data root if not specified
+        if data_root is None:
+            data_root = self.data_root if hasattr(self, "data_root") else "/tmp/dummy"
+
+        # Initialize basic attributes without calling parent __init__ to avoid directory validation
+        self.data_root = Path(data_root)
+        self.domain = domain
+        self.split = split
+        self.max_files = None
+
+        # Load domain calibration parameters
+        self.domain_params = self._load_domain_calibration()
+
+        # Set the custom files list directly
+        self.files = files
+
+        # Validate files exist
+        self.valid_files = []
+        for file_path in self.files:
+            if Path(file_path).exists():
+                self.valid_files.append(file_path)
+            else:
+                logger.warning(f"File not found, skipping: {file_path}")
+
+        if not self.valid_files:
+            raise ValueError(f"No valid files found in provided file list")
+
+        logger.info(
+            f"Custom dataset created with {len(self.valid_files)} valid files for {domain} {split}"
+        )
+
+    def __len__(self) -> int:
+        """Return number of valid files."""
+        return len(self.valid_files)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        """Get item using valid files list."""
+        if idx >= len(self.valid_files):
+            raise IndexError(
+                f"Index {idx} out of range for dataset with {len(self.valid_files)} files"
+            )
+
+        file_path = self.valid_files[idx]
+
+        try:
+            # Use weights_only=False for older PyTorch compatibility
+            data = torch.load(file_path, map_location="cpu", weights_only=False)
+
+            # Extract clean image
+            clean = data["clean_norm"]  # [4, 128, 128] for photography
+
+            # Keep 4-channel RGGB format for diffusion model training
+            # The model now supports 4-channel input
+
+            # For diffusion training, we need to add noise to create noisy version
+            # For now, use clean as both clean and noisy (noise will be added in trainer)
+            noisy = clean.clone()
+
+            # Add some synthetic noise for training
+            noise_std = 0.1
+            noisy = noisy + torch.randn_like(clean) * noise_std
+
+            # Get domain parameters
+            domain_params = self.domain_params.copy()
+            domain_params["domain"] = self.domain
+
+            return {
+                "clean": clean.float(),
+                "noisy": noisy.float(),
+                "electrons": clean.float(),  # Target for loss function
+                "domain": torch.tensor([data.get("domain_id", 0)]),
+                "metadata": data.get("metadata", {}),
+                "domain_params": domain_params,  # Domain calibration parameters
+            }
+
+        except Exception as e:
+            logger.error(f"Error loading {file_path}: {e}")
+            # Return dummy data on error to prevent training crashes
+            return {
+                "clean": torch.zeros(4, 128, 128, dtype=torch.float32),
+                "noisy": torch.zeros(4, 128, 128, dtype=torch.float32),
+                "electrons": torch.zeros(4, 128, 128, dtype=torch.float32),
+                "domain": torch.tensor([0]),
+                "metadata": {"corrupted": True, "original_idx": idx},
+                "domain_params": self.domain_params.copy(),
+            }
+
+    def __getstate__(self):
+        """Support for pickling in multiprocessing."""
+        state = self.__dict__.copy()
+        # Remove any unpickleable attributes if they exist
+        # (logger is handled by the parent class)
+        return state
+
+    def __setstate__(self, state):
+        """Support for unpickling in multiprocessing."""
+        self.__dict__.update(state)
+
+
+class SimpleMultiDomainDataset:
+    """Simple wrapper to make a single dataset look like a multi-domain dataset."""
+
+    def __init__(self, dataset, domain):
+        self.combined_dataset = dataset
+        self.domain_datasets = {domain: dataset}
+
+    def __len__(self):
+        return len(self.combined_dataset)
+
+    def __getitem__(self, idx):
+        return self.combined_dataset[idx]
+
+    def __getstate__(self):
+        """Support for pickling in multiprocessing."""
+        return {
+            "combined_dataset": self.combined_dataset,
+            "domain_datasets": self.domain_datasets,
+        }
+
+    def __setstate__(self, state):
+        """Support for unpickling in multiprocessing."""
+        self.combined_dataset = state["combined_dataset"]
+        self.domain_datasets = state["domain_datasets"]
+
+
+def _create_simple_multi_domain_dataset(dataset, domain):
+    """Factory function to create SimpleMultiDomainDataset at module level."""
+    return SimpleMultiDomainDataset(dataset, domain)
+
 
 def create_preprocessed_datasets(
     data_root: Union[str, Path],
@@ -213,7 +450,7 @@ def create_preprocessed_datasets(
     max_files: Optional[int] = None,
     seed: int = 42,
     val_split: float = 0.2,
-) -> Tuple[PreprocessedMultiDomainDataset, PreprocessedMultiDomainDataset]:
+) -> Tuple["SimpleMultiDomainDataset", "SimpleMultiDomainDataset"]:
     """
     Create train and validation datasets from preprocessed data.
 
@@ -252,28 +489,175 @@ def create_preprocessed_datasets(
     )
 
     # Create custom datasets with specific file lists
-    class CustomPreprocessedDataset(PreprocessedPriorDataset):
-        def __init__(self, files, domain, split):
-            self.files = files
-            self.domain = domain
-            self.split = split
+    train_ds = CustomPreprocessedDataset(train_files, domain, "train", data_root)
+    val_ds = CustomPreprocessedDataset(val_files, domain, "val", data_root)
 
-    train_ds = CustomPreprocessedDataset(train_files, domain, "train")
-    val_ds = CustomPreprocessedDataset(val_files, domain, "val")
-
-    # Wrap in multi-domain format
-    class SimpleMultiDomainDataset:
-        def __init__(self, dataset, domain):
-            self.combined_dataset = dataset
-            self.domain_datasets = {domain: dataset}
-
-        def __len__(self):
-            return len(self.combined_dataset)
-
-        def __getitem__(self, idx):
-            return self.combined_dataset[idx]
-
+    # Create wrapper instances with explicit global reference to avoid pickle issues
+    # This ensures the class is properly resolved at module level
+    global SimpleMultiDomainDataset
     train_dataset = SimpleMultiDomainDataset(train_ds, domain)
     val_dataset = SimpleMultiDomainDataset(val_ds, domain)
 
     return train_dataset, val_dataset
+
+
+class MultiResolutionDataset:
+    """
+    Wrapper dataset that dynamically resizes data based on current training resolution.
+
+    This dataset wraps an existing dataset and provides dynamic resolution scaling
+    for progressive multi-resolution training. It maintains the original data at
+    128×128 and scales down/up as needed for different training stages.
+    """
+
+    def __init__(
+        self, base_dataset, resolution_scheduler=None, current_resolution: int = 128
+    ):
+        """
+        Initialize multi-resolution dataset wrapper.
+
+        Args:
+            base_dataset: Base dataset providing 128×128 tiles
+            resolution_scheduler: Resolution scheduler (optional)
+            current_resolution: Current training resolution
+        """
+        self.base_dataset = base_dataset
+        self.resolution_scheduler = resolution_scheduler
+        self.current_resolution = current_resolution
+
+        # Forward dataset attributes
+        if hasattr(base_dataset, "domain_datasets"):
+            self.domain_datasets = base_dataset.domain_datasets
+        if hasattr(base_dataset, "combined_dataset"):
+            self.combined_dataset = base_dataset.combined_dataset
+
+    def __len__(self):
+        return len(self.base_dataset)
+
+    def __getitem__(self, idx):
+        """Get item with dynamic resolution scaling."""
+        import torch.nn.functional as F
+
+        # Get original item from base dataset
+        item = self.base_dataset[idx]
+
+        # Update current resolution if scheduler is available
+        if self.resolution_scheduler:
+            self.current_resolution = self.resolution_scheduler.get_current_resolution()
+
+        # Scale image tensors if needed
+        if self.current_resolution != 128:
+            scaled_item = {}
+            for key, value in item.items():
+                if key in ["clean", "noisy", "image"] and isinstance(
+                    value, torch.Tensor
+                ):
+                    if len(value.shape) >= 2 and value.shape[-1] == 128:
+                        # Resize tensor to current resolution
+                        if len(value.shape) == 2:  # [H, W]
+                            value = value.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+                            resized = F.interpolate(
+                                value,
+                                size=(self.current_resolution, self.current_resolution),
+                                mode="bilinear",
+                                align_corners=False,
+                            )
+                            scaled_item[key] = resized.squeeze(0).squeeze(0)  # [H, W]
+                        elif len(value.shape) == 3:  # [C, H, W]
+                            value = value.unsqueeze(0)  # [1, C, H, W]
+                            resized = F.interpolate(
+                                value,
+                                size=(self.current_resolution, self.current_resolution),
+                                mode="bilinear",
+                                align_corners=False,
+                            )
+                            scaled_item[key] = resized.squeeze(0)  # [C, H, W]
+                        elif len(value.shape) == 4:  # [B, C, H, W]
+                            resized = F.interpolate(
+                                value,
+                                size=(self.current_resolution, self.current_resolution),
+                                mode="bilinear",
+                                align_corners=False,
+                            )
+                            scaled_item[key] = resized
+                        else:
+                            scaled_item[key] = value
+                    else:
+                        scaled_item[key] = value
+                else:
+                    scaled_item[key] = value
+
+            return scaled_item
+        else:
+            return item
+
+    def update_resolution(self, new_resolution: int):
+        """Update the current training resolution."""
+        self.current_resolution = new_resolution
+
+    def set_resolution_scheduler(self, scheduler):
+        """Set the resolution scheduler."""
+        self.resolution_scheduler = scheduler
+
+
+def create_multi_resolution_loader(
+    data_root: Union[str, Path],
+    domains: List[str],
+    split: str = "train",
+    batch_size: int = 32,
+    balance_domains: bool = True,
+    resolution_scheduler=None,
+    current_resolution: int = 128,
+    **loader_kwargs,
+):
+    """
+    Create a multi-resolution data loader.
+
+    Args:
+        data_root: Root directory containing preprocessed data
+        domains: List of domain names to include
+        split: Data split (train, val, test)
+        batch_size: Batch size
+        balance_domains: Whether to balance domains in batches
+        resolution_scheduler: Resolution scheduler for dynamic scaling
+        current_resolution: Initial resolution
+        **loader_kwargs: Additional DataLoader arguments
+
+    Returns:
+        DataLoader with multi-resolution support
+    """
+    from torch.utils.data import DataLoader
+
+    # Create base multi-domain dataset
+    base_loader = PreprocessedDataLoader.create_prior_loader(
+        root=data_root,
+        domains=domains,
+        split=split,
+        batch_size=batch_size,
+        balance_domains=balance_domains,
+        **loader_kwargs,
+    )
+
+    # Get the base dataset
+    base_dataset = base_loader.dataset
+
+    # Wrap with multi-resolution capability
+    multi_res_dataset = MultiResolutionDataset(
+        base_dataset=base_dataset,
+        resolution_scheduler=resolution_scheduler,
+        current_resolution=current_resolution,
+    )
+
+    # Create new DataLoader with multi-resolution dataset
+    multi_res_loader = DataLoader(
+        multi_res_dataset,
+        batch_size=batch_size,
+        shuffle=loader_kwargs.get("shuffle", True),
+        num_workers=loader_kwargs.get("num_workers", 0),
+        pin_memory=loader_kwargs.get("pin_memory", False),
+        collate_fn=base_loader.collate_fn
+        if hasattr(base_loader, "collate_fn")
+        else None,
+    )
+
+    return multi_res_loader

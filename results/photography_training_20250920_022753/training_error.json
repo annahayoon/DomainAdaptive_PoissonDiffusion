@@ -1,6 +1,0 @@
-{
-  "error": "'Tensor' object has no attribute 'get'",
-  "training_time_hours": 0.0017030290762583414,
-  "failed_epoch": 0,
-  "device": "cuda"
-}

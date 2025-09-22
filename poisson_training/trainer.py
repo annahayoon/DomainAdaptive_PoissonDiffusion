@@ -61,6 +61,9 @@ class TrainingConfig:
     batch_size: int = 16
     learning_rate: float = 1e-4
     num_epochs: int = 100
+    max_steps: Optional[
+        int
+    ] = None  # Maximum training steps (overrides num_epochs if set)
     warmup_epochs: int = 5
 
     # Optimizer settings
@@ -85,9 +88,17 @@ class TrainingConfig:
 
     # Validation and checkpointing
     val_frequency: int = 1  # Validate every N epochs
-    save_frequency: int = 5  # Save checkpoint every N epochs
+    val_frequency_steps: Optional[
+        int
+    ] = None  # Validate every N steps (overrides val_frequency if set)
+    save_frequency_steps: int = (
+        50000  # Save checkpoint every N steps (diffusion standard)
+    )
     max_checkpoints: int = 5
-    early_stopping_patience: int = 20
+    early_stopping_patience_steps: int = (
+        100000  # Step-based patience (diffusion standard)
+    )
+    validation_checkpoints_patience: int = 20  # Validation checkpoint-based patience
     early_stopping_min_delta: float = 1e-4
 
     # Reproducibility
@@ -200,11 +211,12 @@ class DeterministicTrainer:
         self.global_step = 0
         self.best_val_loss = float("inf")
         self.early_stopping_counter = 0
-        self.training_history = defaultdict(list)
+        self.validation_checkpoint_counter = 0
+        self.training_history = defaultdict(self._create_list)
 
         # Mixed precision
         if self.config.mixed_precision:
-            self.scaler = torch.cuda.amp.GradScaler()
+            self.scaler = torch.amp.GradScaler("cuda")
         else:
             self.scaler = None
 
@@ -235,6 +247,10 @@ class DeterministicTrainer:
                 logger.info(f"Validation samples: {len(self.val_dataloader.dataset)}")
             else:
                 logger.info(f"Validation batches: {len(self.val_dataloader)}")
+
+    def _create_list(self):
+        """Create a list for defaultdict factory (pickle-safe)."""
+        return list()
 
     def _setup_device(self) -> torch.device:
         """Setup computation device."""
@@ -373,7 +389,7 @@ class DeterministicTrainer:
 
         # Forward pass with mixed precision
         if self.config.mixed_precision and self.scaler is not None:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast("cuda"):
                 model_output = self.model(
                     x,
                     sigma,
@@ -518,7 +534,7 @@ class DeterministicTrainer:
             Dictionary of average losses for the epoch
         """
         self.model.train()
-        epoch_losses = defaultdict(list)
+        epoch_losses = defaultdict(self._create_list)
 
         # Setup progress tracking
         num_batches = len(self.train_dataloader)
@@ -556,6 +572,74 @@ class DeterministicTrainer:
 
                 self.global_step += 1
 
+                # Step-based validation and checkpointing (if step-based validation is enabled)
+                if self.config.val_frequency_steps is not None:
+                    # Step-based validation
+                    val_occurred = False
+                    if (
+                        self.val_dataloader
+                        and self.global_step % self.config.val_frequency_steps == 0
+                    ):
+                        logger.info(
+                            f"\n=== Step-based Validation at Step {self.global_step} ==="
+                        )
+                        val_losses = self.validate_epoch()
+                        val_occurred = True
+
+                        # Record validation history
+                        for key, value in val_losses.items():
+                            self.training_history[f"val_{key}"].append(value)
+
+                        # Check if this is the best model
+                        is_best = False
+                        if val_losses:
+                            val_loss = val_losses["total_loss"]
+                            if val_loss < self.best_val_loss:
+                                self.best_val_loss = val_loss
+                                is_best = True
+                                logger.info(
+                                    f"🎯 New best validation loss: {val_loss:.6f}"
+                                )
+
+                        # Save checkpoint if it's the best model or regular checkpoint interval
+                        if (
+                            self.global_step % self.config.save_frequency_steps == 0
+                            or is_best
+                        ):
+                            self.save_checkpoint(is_best=is_best)
+
+                        # Log step-based validation results
+                        log_data = {
+                            "step": self.global_step,
+                            "train_loss": loss_dict["total_loss"],
+                            "learning_rate": lr,
+                            "val_loss": val_losses.get("total_loss", 0.0),
+                        }
+                        self._save_step_log(log_data)
+
+                        logger.info(
+                            f"Step {self.global_step} | Train Loss: {loss_dict['total_loss']:.4f} | Val Loss: {val_losses.get('total_loss', 0.0):.4f}"
+                        )
+
+                    # Regular step-based checkpointing (without validation)
+                    elif self.global_step % self.config.save_frequency_steps == 0:
+                        logger.info(
+                            f"\n=== Step-based Checkpoint at Step {self.global_step} ==="
+                        )
+                        self.save_checkpoint(is_best=False)
+
+                        # Log step-based checkpoint (without validation)
+                        log_data = {
+                            "step": self.global_step,
+                            "train_loss": loss_dict["total_loss"],
+                            "learning_rate": lr,
+                        }
+                        self._save_step_log(log_data)
+
+                        logger.info(
+                            f"Step {self.global_step} | Train Loss: {loss_dict['total_loss']:.4f} | Checkpoint Saved"
+                        )
+
             except Exception as e:
                 logger.error(f"Error in training step {batch_idx}: {e}")
                 if self.config.deterministic:
@@ -583,7 +667,7 @@ class DeterministicTrainer:
         model = self.ema_model if self.ema_model is not None else self.model
         model.eval()
 
-        epoch_losses = defaultdict(list)
+        epoch_losses = defaultdict(self._create_list)
 
         with torch.no_grad():
             for batch_idx, batch in enumerate(self.val_dataloader):
@@ -629,7 +713,50 @@ class DeterministicTrainer:
             return False
         else:
             self.early_stopping_counter += 1
-            return self.early_stopping_counter >= self.config.early_stopping_patience
+            return (
+                self.early_stopping_counter >= self.config.early_stopping_patience_steps
+            )
+
+    def should_early_stop_checkpoints(self, val_loss: float) -> bool:
+        """
+        Check if training should stop early based on validation checkpoints.
+
+        Args:
+            val_loss: Current validation loss
+
+        Returns:
+            True if training should stop
+        """
+        if val_loss < self.best_val_loss - self.config.early_stopping_min_delta:
+            self.best_val_loss = val_loss
+            self.validation_checkpoint_counter = 0
+            return False
+        else:
+            self.validation_checkpoint_counter += 1
+            return (
+                self.validation_checkpoint_counter
+                >= self.config.validation_checkpoints_patience
+            )
+
+    def _save_step_log(self, log_data: Dict[str, Any]) -> None:
+        """
+        Save step-based training log to file.
+
+        Args:
+            log_data: Dictionary containing step log data
+        """
+        log_dir = Path(self.config.checkpoint_dir).parent / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        log_file = log_dir / "training_steps.log"
+
+        with open(log_file, "a") as f:
+            f.write(
+                f"{log_data['step']},{log_data['train_loss']:.6f},{log_data['learning_rate']:.8f}"
+            )
+            if "val_loss" in log_data:
+                f.write(f",{log_data['val_loss']:.6f}")
+            f.write("\n")
 
     def save_checkpoint(self, is_best: bool = False, extra_info: Optional[Dict] = None):
         """
@@ -649,6 +776,7 @@ class DeterministicTrainer:
             else None,
             "best_val_loss": self.best_val_loss,
             "early_stopping_counter": self.early_stopping_counter,
+            "validation_checkpoint_counter": self.validation_checkpoint_counter,
             "config": self.config.to_dict(),
             "training_history": dict(self.training_history),
             "rng_state": torch.get_rng_state(),
@@ -674,15 +802,17 @@ class DeterministicTrainer:
         # Save checkpoint
         checkpoint_path = (
             Path(self.config.checkpoint_dir)
-            / f"checkpoint_epoch_{self.current_epoch:04d}.pt"
+            / f"checkpoint_step_{self.global_step:08d}.pt"
         )
         save_checkpoint(checkpoint_data, checkpoint_path)
 
-        # Save best checkpoint
+        # Save best model only
         if is_best:
-            best_path = Path(self.config.checkpoint_dir) / "best_checkpoint.pt"
-            save_checkpoint(checkpoint_data, best_path)
-            logger.info(f"Saved best checkpoint: {best_path}")
+            best_path = Path(self.config.checkpoint_dir) / "best_model.pt"
+            save_checkpoint(
+                checkpoint_data, best_path, backup=False
+            )  # Don't backup best model
+            logger.info(f"Saved best model: {best_path}")
 
         # Clean up old checkpoints
         self._cleanup_checkpoints()
@@ -690,7 +820,7 @@ class DeterministicTrainer:
     def _cleanup_checkpoints(self):
         """Clean up old checkpoints to save disk space."""
         checkpoint_dir = Path(self.config.checkpoint_dir)
-        checkpoints = sorted(checkpoint_dir.glob("checkpoint_epoch_*.pt"))
+        checkpoints = sorted(checkpoint_dir.glob("checkpoint_step_*.pt"))
 
         if len(checkpoints) > self.config.max_checkpoints:
             for checkpoint in checkpoints[: -self.config.max_checkpoints]:
@@ -718,9 +848,14 @@ class DeterministicTrainer:
             self.global_step = checkpoint_data["global_step"]
             self.best_val_loss = checkpoint_data["best_val_loss"]
             self.early_stopping_counter = checkpoint_data["early_stopping_counter"]
-            self.training_history = defaultdict(
-                list, checkpoint_data.get("training_history", {})
+            self.validation_checkpoint_counter = checkpoint_data.get(
+                "validation_checkpoint_counter", 0
             )
+            # Restore training history with pickle-safe approach
+            history_data = checkpoint_data.get("training_history", {})
+            self.training_history = defaultdict(self._create_list)
+            for key, values in history_data.items():
+                self.training_history[key].extend(values)
 
             # Load optimizer and scheduler
             self.optimizer.load_state_dict(checkpoint_data["optimizer_state_dict"])
@@ -745,11 +880,171 @@ class DeterministicTrainer:
 
         logger.info(f"Loaded checkpoint from {checkpoint_path}")
 
+    def train_step_based(
+        self, resume_from_checkpoint: Optional[str] = None
+    ) -> Dict[str, List[float]]:
+        """
+        Step-based training loop.
+
+        Args:
+            resume_from_checkpoint: Path to checkpoint to resume from
+
+        Returns:
+            Training history dictionary
+        """
+        logger.info("Starting step-based training...")
+
+        # Load checkpoint if provided
+        if resume_from_checkpoint:
+            self.load_checkpoint(resume_from_checkpoint)
+
+        # Calculate max steps
+        if self.config.max_steps is not None:
+            max_steps = self.config.max_steps
+        else:
+            # Calculate from epochs
+            steps_per_epoch = len(self.train_dataloader)
+            max_steps = self.config.num_epochs * steps_per_epoch
+
+        logger.info(f"Training for {max_steps} steps")
+
+        # Create infinite data iterator
+        train_iterator = iter(self.train_dataloader)
+
+        try:
+            while self.global_step < max_steps:
+                try:
+                    # Get next batch (restart iterator if needed)
+                    try:
+                        batch = next(train_iterator)
+                    except StopIteration:
+                        train_iterator = iter(self.train_dataloader)
+                        batch = next(train_iterator)
+                        self.current_epoch += 1
+                        logger.info(
+                            f"Completed epoch {self.current_epoch}, continuing training..."
+                        )
+
+                    # Training step
+                    self.model.train()
+                    loss_dict = self.train_step(batch)
+
+                    # Update metrics
+                    self.metrics.update(loss_dict, phase="train")
+
+                    # Logging
+                    if self.global_step % self.config.log_frequency == 0:
+                        lr = self.optimizer.param_groups[0]["lr"]
+                        logger.info(
+                            f"Step {self.global_step:6d}/{max_steps:6d} | "
+                            f"Epoch {self.current_epoch:3d} | "
+                            f"Loss: {loss_dict['total_loss']:.4f} | "
+                            f"LR: {lr:.2e}"
+                        )
+
+                        # TensorBoard logging
+                        for key, value in loss_dict.items():
+                            self.writer.add_scalar(
+                                f"train/{key}", value, self.global_step
+                            )
+                        self.writer.add_scalar(
+                            "train/learning_rate", lr, self.global_step
+                        )
+
+                    self.global_step += 1
+
+                    # Step-based validation
+                    if (
+                        self.config.val_frequency_steps is not None
+                        and self.val_dataloader
+                        and self.global_step % self.config.val_frequency_steps == 0
+                    ):
+                        logger.info(f"\n=== Validation at Step {self.global_step} ===")
+                        val_losses = self.validate_epoch()
+
+                        # Record validation history
+                        for key, value in val_losses.items():
+                            self.training_history[f"val_{key}"].append(value)
+
+                        # Check if this is the best model
+                        is_best = False
+                        if val_losses:
+                            val_loss = val_losses["total_loss"]
+                            if val_loss < self.best_val_loss:
+                                self.best_val_loss = val_loss
+                                is_best = True
+                                logger.info(
+                                    f"🎯 New best validation loss: {val_loss:.6f}"
+                                )
+
+                        # Learning rate scheduling (if using validation-based scheduler)
+                        if self.scheduler and isinstance(
+                            self.scheduler, optim.lr_scheduler.ReduceLROnPlateau
+                        ):
+                            self.scheduler.step(val_losses["total_loss"])
+
+                        # Log validation results
+                        log_data = {
+                            "step": self.global_step,
+                            "train_loss": loss_dict["total_loss"],
+                            "learning_rate": lr,
+                            "val_loss": val_losses.get("total_loss", 0.0),
+                        }
+                        self._save_step_log(log_data)
+
+                        logger.info(
+                            f"Step {self.global_step} | Train: {loss_dict['total_loss']:.4f} | Val: {val_losses.get('total_loss', 0.0):.4f}"
+                        )
+
+                        # Save checkpoint if it's the best or regular interval
+                        if (
+                            self.global_step % self.config.save_frequency_steps == 0
+                            or is_best
+                        ):
+                            self.save_checkpoint(is_best=is_best)
+
+                    # Regular step-based checkpointing (without validation)
+                    elif self.global_step % self.config.save_frequency_steps == 0:
+                        logger.info(f"\n=== Checkpoint at Step {self.global_step} ===")
+                        self.save_checkpoint(is_best=False)
+
+                        # Log checkpoint
+                        log_data = {
+                            "step": self.global_step,
+                            "train_loss": loss_dict["total_loss"],
+                            "learning_rate": lr,
+                        }
+                        self._save_step_log(log_data)
+
+                    # Non-validation-based learning rate scheduling
+                    if self.scheduler and not isinstance(
+                        self.scheduler, optim.lr_scheduler.ReduceLROnPlateau
+                    ):
+                        self.scheduler.step()
+
+                except Exception as e:
+                    logger.error(f"Error in training step {self.global_step}: {e}")
+                    if self.config.deterministic:
+                        raise
+                    continue
+
+        except KeyboardInterrupt:
+            logger.info("Training interrupted by user")
+            self.save_checkpoint(is_best=False, extra_info={"interrupted": True})
+
+        except Exception as e:
+            logger.error(f"Training failed: {e}")
+            self.save_checkpoint(is_best=False, extra_info={"error": str(e)})
+            raise
+
+        logger.info("Step-based training completed successfully!")
+        return self.training_history
+
     def train(
         self, resume_from_checkpoint: Optional[str] = None
     ) -> Dict[str, List[float]]:
         """
-        Main training loop.
+        Main training loop. Uses step-based training if val_frequency_steps is set.
 
         Args:
             resume_from_checkpoint: Path to checkpoint to resume from
@@ -757,7 +1052,14 @@ class DeterministicTrainer:
         Returns:
             Training history
         """
-        logger.info("Starting training...")
+        # Use step-based training if step-based validation is configured
+        if (
+            self.config.val_frequency_steps is not None
+            or self.config.max_steps is not None
+        ):
+            return self.train_step_based(resume_from_checkpoint)
+
+        logger.info("Starting epoch-based training...")
         logger.info(f"Configuration: {self.config}")
 
         # Resume from checkpoint if provided
@@ -780,9 +1082,13 @@ class DeterministicTrainer:
                 # Training phase
                 train_losses = self.train_epoch()
 
-                # Validation phase
+                # Validation phase (only if step-based validation is not enabled)
                 val_losses = {}
-                if self.val_dataloader and (epoch + 1) % self.config.val_frequency == 0:
+                if (
+                    self.val_dataloader
+                    and self.config.val_frequency_steps is None
+                    and (epoch + 1) % self.config.val_frequency == 0
+                ):
                     val_losses = self.validate_epoch()
 
                 # Learning rate scheduling
@@ -808,17 +1114,52 @@ class DeterministicTrainer:
                 if val_losses:
                     logger.info(f"Val Loss: {val_losses['total_loss']:.4f}")
 
-                # Checkpointing
+                # Check if this is the best model (for epoch-based validation only)
+                # Note: When step-based validation is enabled, best model tracking happens in train_epoch()
                 is_best = False
-                if val_losses and val_losses["total_loss"] < self.best_val_loss:
-                    is_best = True
+                if val_losses and self.config.val_frequency_steps is None:
+                    val_loss = val_losses["total_loss"]
+                    if val_loss < self.best_val_loss:
+                        self.best_val_loss = val_loss
+                        is_best = True
 
-                if (epoch + 1) % self.config.save_frequency == 0 or is_best:
+                # Step-based checkpointing (diffusion standard)
+                # Only save checkpoint here if step-based validation is NOT enabled
+                # (when step-based validation is enabled, checkpointing happens in train_epoch())
+                if self.config.val_frequency_steps is None and (
+                    self.global_step % self.config.save_frequency_steps == 0 or is_best
+                ):
                     self.save_checkpoint(is_best=is_best)
 
-                # Early stopping
-                if val_losses and self.should_early_stop(val_losses["total_loss"]):
-                    logger.info(f"Early stopping triggered after {epoch + 1} epochs")
+                # Step-based logging every 5000 steps (diffusion standard)
+                if self.global_step % 5000 == 0:
+                    log_data = {
+                        "step": self.global_step,
+                        "train_loss": train_losses["total_loss"],
+                        "learning_rate": self.optimizer.param_groups[0]["lr"],
+                    }
+                    if val_losses:
+                        log_data["val_loss"] = val_losses["total_loss"]
+
+                    # Log to console
+                    log_msg = f"Step {self.global_step:8d} | "
+                    log_msg += f"Train Loss: {train_losses['total_loss']:.4f} | "
+                    log_msg += f"LR: {self.optimizer.param_groups[0]['lr']:.6f}"
+                    if val_losses:
+                        log_msg += f" | Val Loss: {val_losses['total_loss']:.4f}"
+                    logger.info(log_msg)
+
+                    # Save to log file
+                    self._save_step_log(log_data)
+
+                # Early stopping (validation checkpoint-based)
+                if val_losses and self.should_early_stop_checkpoints(
+                    val_losses["total_loss"]
+                ):
+                    logger.info(
+                        f"Early stopping triggered after {self.validation_checkpoint_counter} validation checkpoints"
+                    )
+                    logger.info(f"Best validation loss: {self.best_val_loss:.6f}")
                     break
 
                 # TensorBoard logging

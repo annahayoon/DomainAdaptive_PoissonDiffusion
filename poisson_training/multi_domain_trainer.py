@@ -20,13 +20,16 @@ Task: 5.2 from tasks.md
 import logging
 import math
 import random
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from core.error_handlers import ErrorHandler, safe_operation
@@ -88,9 +91,17 @@ class MultiDomainTrainingConfig(TrainingConfig):
     # Domain-specific schedulers (optional)
     domain_schedulers: Optional[Dict[str, str]] = None
 
+    # Multi-resolution training settings
+    multi_resolution: bool = False
+    resolution_scheduler_type: str = "progressive"  # "progressive" or "adaptive"
+    min_resolution: int = 32
+    max_resolution: int = 128
+    num_resolution_stages: int = 4
+    epochs_per_resolution_stage: int = 25
+
 
 class DomainConditioningEncoder:
-    """Encodes domain information into conditioning vectors."""
+    """Encodes domain and resolution information into conditioning vectors."""
 
     def __init__(self, domains: List[str], conditioning_dim: int = 6):
         """
@@ -208,7 +219,7 @@ class DomainBalancedSampler:
         self._compute_sampling_weights()
 
         # Performance tracking for adaptive rebalancing
-        self.domain_performance = defaultdict(list)
+        self.domain_performance = defaultdict(self._create_performance_list)
         self.batch_count = 0
 
         logger.info(
@@ -216,6 +227,10 @@ class DomainBalancedSampler:
         )
         logger.info(f"Domain sizes: {self.domain_sizes}")
         logger.info(f"Sampling strategy: {config.sampling_strategy}")
+
+    def _create_performance_list(self):
+        """Create a list for domain performance tracking (pickle-safe)."""
+        return list()
 
     def _compute_sampling_weights(self):
         """Compute sampling weights for each domain."""
@@ -380,6 +395,7 @@ class MultiDomainTrainer(DeterministicTrainer):
         train_dataset: MultiDomainDataset,
         val_dataset: Optional[MultiDomainDataset],
         config: MultiDomainTrainingConfig,
+        output_dir: Optional[Path] = None,
         loss_fn: Optional[nn.Module] = None,
         metrics: Optional[TrainingMetrics] = None,
     ):
@@ -391,6 +407,7 @@ class MultiDomainTrainer(DeterministicTrainer):
             train_dataset: Multi-domain training dataset
             val_dataset: Multi-domain validation dataset
             config: Multi-domain training configuration
+            output_dir: Output directory for saving configurations and results
             loss_fn: Loss function (will create if None)
             metrics: Metrics tracker (will create if None)
         """
@@ -402,6 +419,37 @@ class MultiDomainTrainer(DeterministicTrainer):
         )
 
         # Initialize domain balanced sampler
+        # Setup resolution scheduler first (needed for data loader creation)
+        if config.multi_resolution:
+            self.resolution_scheduler = self._setup_resolution_scheduler(config)
+            logger.info(
+                f"Multi-resolution training enabled: {config.resolution_scheduler_type}"
+            )
+            logger.info(
+                f"Resolution stages: {config.min_resolution} → {config.max_resolution}"
+            )
+        else:
+            self.resolution_scheduler = None
+
+        # Initialize resolution tracking
+        if self.resolution_scheduler:
+            self.current_resolution = self.resolution_scheduler.get_current_resolution()
+            logger.info(
+                f"Starting resolution: {self.current_resolution}×{self.current_resolution}"
+            )
+
+            # Initialize adaptive resolution manager for intelligent resolution selection
+            if config.resolution_scheduler_type == "adaptive":
+                from core.transforms import AdaptiveResolutionManager
+
+                self.adaptive_resolution_manager = AdaptiveResolutionManager(
+                    min_resolution=config.min_resolution,
+                    max_resolution=config.max_resolution,
+                )
+                logger.info("🧠 Adaptive resolution manager initialized")
+            else:
+                self.adaptive_resolution_manager = None
+
         self.domain_sampler = DomainBalancedSampler(
             dataset=train_dataset,
             config=config.domain_balancing,
@@ -432,19 +480,51 @@ class MultiDomainTrainer(DeterministicTrainer):
         if metrics is not None:
             self.metrics = metrics
 
+        # Initialize multi-resolution metrics if enabled
+        if config.multi_resolution:
+            from poisson_training.metrics import MultiResolutionMetrics
+
+            self.multi_res_metrics = MultiResolutionMetrics()
+            logger.info("📊 Multi-resolution metrics initialized")
+        else:
+            self.multi_res_metrics = None
+
         # Multi-domain specific attributes
         self.config = config
         self.domain_balancing_config = config.domain_balancing
+
+        # Output directory for saving configurations
+        self.output_dir = output_dir
 
         # Domain-specific loss weights
         self.domain_loss_weights = self._setup_domain_loss_weights()
 
         # Domain performance tracking
-        self.domain_metrics = defaultdict(lambda: defaultdict(list))
+        self.domain_metrics = defaultdict(self._create_list_dict)
         self.batch_domain_stats = defaultdict(int)
 
         logger.info(f"Initialized multi-domain trainer for {len(self.domains)} domains")
         logger.info(f"Domains: {self.domains}")
+
+    def _create_list_dict(self):
+        """Create a defaultdict with list values for domain metrics."""
+        return defaultdict(list)
+
+    def _create_epoch_list(self):
+        """Create a list for epoch metrics (pickle-safe)."""
+        return list()
+
+    def _setup_resolution_scheduler(self, config: MultiDomainTrainingConfig):
+        """Setup resolution scheduler for multi-resolution training."""
+        from .schedulers import create_resolution_scheduler
+
+        return create_resolution_scheduler(
+            scheduler_type=config.resolution_scheduler_type,
+            min_resolution=config.min_resolution,
+            max_resolution=config.max_resolution,
+            num_stages=config.num_resolution_stages,
+            epochs_per_stage=config.epochs_per_resolution_stage,
+        )
 
     def _create_balanced_dataloader(
         self,
@@ -452,7 +532,25 @@ class MultiDomainTrainer(DeterministicTrainer):
         config: MultiDomainTrainingConfig,
         is_training: bool,
     ) -> DataLoader:
-        """Create data loader with balanced sampling."""
+        """Create data loader with balanced sampling and optional multi-resolution support."""
+
+        # Wrap dataset with multi-resolution capability if enabled
+        if config.multi_resolution and is_training:
+            from data.preprocessed_datasets import MultiResolutionDataset
+
+            dataset = MultiResolutionDataset(
+                base_dataset=dataset,
+                resolution_scheduler=self.resolution_scheduler,
+                current_resolution=self.current_resolution
+                if hasattr(self, "current_resolution")
+                else config.min_resolution,
+            )
+
+            logger.info(f"🔄 Wrapped dataset with multi-resolution support")
+            logger.info(
+                f"   Initial resolution: {dataset.current_resolution}×{dataset.current_resolution}"
+            )
+
         if is_training and config.domain_balancing.sampling_strategy != "uniform":
             # Use custom batch sampling for training
             return DataLoader(
@@ -527,7 +625,7 @@ class MultiDomainTrainer(DeterministicTrainer):
     def _train_epoch(self) -> Dict[str, float]:
         """Train one epoch with domain balancing."""
         self.model.train()
-        epoch_metrics = defaultdict(list)
+        epoch_metrics = defaultdict(self._create_epoch_list)
         domain_batch_counts = defaultdict(int)
 
         # Custom batch iteration with balanced sampling
@@ -544,6 +642,15 @@ class MultiDomainTrainer(DeterministicTrainer):
 
             # Move to device
             batch = self._move_batch_to_device(batch)
+
+            # Adaptive resolution selection (if enabled)
+            if self.adaptive_resolution_manager:
+                adaptive_resolution = self._select_adaptive_resolution(batch)
+                if adaptive_resolution != self.current_resolution:
+                    # Apply adaptive resolution scaling
+                    batch = self._apply_resolution_scaling(batch, adaptive_resolution)
+
+            # Note: For progressive scheduling, resolution scaling is handled by MultiResolutionDataset wrapper
 
             # Forward pass
             self.optimizer.zero_grad()
@@ -610,6 +717,300 @@ class MultiDomainTrainer(DeterministicTrainer):
 
         # Compute epoch averages
         return {key: np.mean(values) for key, values in epoch_metrics.items()}
+
+    def train(
+        self, resume_from_checkpoint: Optional[str] = None
+    ) -> Dict[str, List[float]]:
+        """
+        Main training loop with multi-resolution support.
+
+        Overrides parent method to add resolution scheduling.
+        """
+        # Initialize training setup (similar to parent)
+        if resume_from_checkpoint:
+            self.load_checkpoint(resume_from_checkpoint)
+
+        # Save configuration
+        if self.output_dir is not None:
+            config_path = self.output_dir / "training_config.json"
+            self.config.save(config_path)
+
+        try:
+            for epoch in range(self.current_epoch, self.config.num_epochs):
+                self.current_epoch = epoch
+                epoch_start_time = time.time()
+
+                # Multi-resolution scheduling
+                if self.resolution_scheduler:
+                    # Check if we should grow resolution
+                    old_resolution = self.current_resolution
+                    (
+                        should_grow,
+                        new_resolution,
+                        message,
+                    ) = self.resolution_scheduler.step(epoch)
+
+                    if should_grow and new_resolution != old_resolution:
+                        self.current_resolution = new_resolution
+                        logger.info(
+                            f"🔄 Resolution change: {old_resolution}×{old_resolution} → {new_resolution}×{new_resolution}"
+                        )
+                        logger.info(f"   {message}")
+
+                        # Grow model resolution if using ProgressiveEDM
+                        if hasattr(self.model, "grow_resolution") and hasattr(
+                            self.model, "stage_resolutions"
+                        ):
+                            target_stage = None
+                            for stage, res in enumerate(self.model.stage_resolutions):
+                                if res == new_resolution:
+                                    target_stage = stage
+                                    break
+
+                            if (
+                                target_stage is not None
+                                and target_stage > self.model.current_stage
+                            ):
+                                success = self.model.grow_resolution()
+                                if success:
+                                    logger.info(
+                                        f"   ✅ Model grown to stage {self.model.current_stage}"
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"   ⚠️ Failed to grow model resolution"
+                                    )
+
+                logger.info(f"\nEpoch {epoch + 1}/{self.config.num_epochs}")
+                if self.resolution_scheduler:
+                    logger.info(
+                        f"Resolution: {self.current_resolution}×{self.current_resolution}"
+                    )
+                logger.info("-" * 50)
+
+                # Training phase
+                train_losses = self.train_epoch()
+
+                # Validation phase
+                val_losses = {}
+                if self.val_dataloader and (epoch + 1) % self.config.val_frequency == 0:
+                    val_losses = self.validate_epoch()
+
+                # Learning rate scheduling
+                if self.scheduler:
+                    if isinstance(
+                        self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau
+                    ):
+                        val_loss = val_losses.get(
+                            "total_loss", train_losses["total_loss"]
+                        )
+                        self.scheduler.step(val_loss)
+                    else:
+                        self.scheduler.step()
+
+                # Record training history
+                for key, value in train_losses.items():
+                    self.training_history[f"train_{key}"].append(value)
+                for key, value in val_losses.items():
+                    self.training_history[f"val_{key}"].append(value)
+
+                # Epoch summary
+                epoch_time = time.time() - epoch_start_time
+                logger.info(f"Epoch {epoch + 1} completed in {epoch_time:.2f}s")
+                logger.info(f"Train Loss: {train_losses['total_loss']:.4f}")
+                if val_losses:
+                    logger.info(f"Val Loss: {val_losses['total_loss']:.4f}")
+
+                # Early stopping check
+                if val_losses:
+                    val_loss = val_losses.get("total_loss", float("inf"))
+                    if self.should_early_stop(val_loss):
+                        logger.info("Early stopping triggered")
+                        break
+
+                # Checkpointing
+                is_best = False
+                if val_losses:
+                    val_loss = val_losses["total_loss"]
+                    if val_loss < self.best_val_loss:
+                        self.best_val_loss = val_loss
+                        is_best = True
+
+                if (epoch + 1) % self.config.save_frequency_steps == 0 or is_best:
+                    self.save_checkpoint(is_best=is_best)
+
+            logger.info("Training completed successfully!")
+            return self.training_history
+
+        except KeyboardInterrupt:
+            logger.info("Training interrupted by user")
+            self.save_checkpoint(is_best=False)
+            return self.training_history
+
+        except Exception as e:
+            logger.error(f"Training failed: {e}")
+            import traceback
+
+            traceback.print_exc()
+            raise
+
+    def validate_epoch(self) -> Dict[str, float]:
+        """
+        Validate one epoch with optional multi-resolution evaluation.
+
+        Overrides parent method to add multi-resolution metrics.
+        """
+        # Run standard validation
+        val_losses = super().validate_epoch()
+
+        # Add multi-resolution evaluation if enabled
+        if self.multi_res_metrics and self.val_dataloader:
+            try:
+                # Collect validation samples for multi-resolution evaluation
+                val_samples = []
+                val_targets = []
+
+                # Sample a few batches for evaluation (to avoid memory issues)
+                max_samples = 20  # Limit samples for efficiency
+                sample_count = 0
+
+                self.model.eval()
+                with torch.no_grad():
+                    for batch in self.val_dataloader:
+                        if sample_count >= max_samples:
+                            break
+
+                        batch = self._move_batch_to_device(batch)
+
+                        if "clean" in batch and "noisy" in batch:
+                            val_samples.append(batch["noisy"])
+                            val_targets.append(batch["clean"])
+                            sample_count += batch["noisy"].shape[0]
+
+                if val_samples:
+                    # Concatenate samples
+                    val_images = torch.cat(val_samples, dim=0)[:max_samples]
+                    val_ground_truth = torch.cat(val_targets, dim=0)[:max_samples]
+
+                    # Evaluate at multiple resolutions
+                    resolutions = [32, 64, 96, 128]
+                    multi_res_results = self.multi_res_metrics.evaluate_at_resolutions(
+                        model=self.model,
+                        test_images=val_images,
+                        ground_truth=val_ground_truth,
+                        resolutions=resolutions,
+                        device=str(self.device),
+                    )
+
+                    # Add multi-resolution metrics to validation results
+                    for res, metrics in multi_res_results.items():
+                        for metric_name, value in metrics.items():
+                            val_losses[f"multi_res_{res}x{res}_{metric_name}"] = value
+
+                    # Log multi-resolution results occasionally
+                    if hasattr(self, "_multi_res_log_counter"):
+                        self._multi_res_log_counter += 1
+                    else:
+                        self._multi_res_log_counter = 1
+
+                    if self._multi_res_log_counter % 5 == 0:  # Log every 5 epochs
+                        logger.info("📊 Multi-Resolution Validation Results:")
+                        for res in resolutions:
+                            if res in multi_res_results:
+                                psnr = multi_res_results[res].get("psnr", 0)
+                                ssim = multi_res_results[res].get("ssim", 0)
+                                logger.info(
+                                    f"   {res}×{res}: PSNR={psnr:.2f}dB, SSIM={ssim:.3f}"
+                                )
+
+            except Exception as e:
+                logger.warning(f"Multi-resolution evaluation failed: {e}")
+
+        return val_losses
+
+    def _apply_resolution_scaling(
+        self, batch: Dict[str, Any], target_resolution: int
+    ) -> Dict[str, Any]:
+        """
+        Apply resolution scaling to batch data for multi-resolution training.
+
+        Args:
+            batch: Input batch dictionary
+            target_resolution: Target resolution for training
+
+        Returns:
+            Batch with scaled resolution
+        """
+        import torch.nn.functional as F
+
+        scaled_batch = batch.copy()
+
+        # Scale image tensors to target resolution
+        for key in ["clean", "noisy", "image"]:
+            if key in batch:
+                tensor = batch[key]
+                if len(tensor.shape) == 4 and tensor.shape[-1] != target_resolution:
+                    # Resize using bilinear interpolation
+                    scaled_tensor = F.interpolate(
+                        tensor,
+                        size=(target_resolution, target_resolution),
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+                    scaled_batch[key] = scaled_tensor
+
+        return scaled_batch
+
+    def _select_adaptive_resolution(self, batch: Dict[str, Any]) -> int:
+        """
+        Select optimal resolution for batch using adaptive resolution manager.
+
+        Args:
+            batch: Input batch dictionary
+
+        Returns:
+            Optimal resolution for this batch
+        """
+        if not self.adaptive_resolution_manager:
+            return self.current_resolution
+
+        # Analyze batch characteristics
+        if "clean" in batch:
+            sample_image = batch["clean"][0]  # Take first image in batch
+        elif "noisy" in batch:
+            sample_image = batch["noisy"][0]
+        else:
+            return self.current_resolution
+
+        # Get adaptive resolution recommendation
+        (
+            optimal_resolution,
+            analysis,
+        ) = self.adaptive_resolution_manager.select_optimal_resolution(
+            image=sample_image,
+            constraints={
+                "max_memory_gb": 4.0,  # Conservative memory constraint
+                "max_time_seconds": 30.0,  # Allow reasonable inference time
+                "quality_preference": "balanced",
+            },
+        )
+
+        # Log adaptive decision occasionally
+        if hasattr(self, "_adaptive_log_counter"):
+            self._adaptive_log_counter += 1
+        else:
+            self._adaptive_log_counter = 1
+
+        if self._adaptive_log_counter % 100 == 0:  # Log every 100 batches
+            logger.info(
+                f"🧠 Adaptive resolution: {optimal_resolution}×{optimal_resolution}"
+            )
+            logger.info(
+                f"   Analysis: noise={analysis.get('noise_score', 0):.2f}, "
+                f"detail={analysis.get('detail_score', 0):.2f}"
+            )
+
+        return optimal_resolution
 
     def _create_batch_from_indices(self, indices: List[int]) -> Dict[str, Any]:
         """Create batch from dataset indices."""
