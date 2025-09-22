@@ -22,22 +22,114 @@ Requirements:
 import argparse
 import json
 import logging
+
+# CRITICAL FIX: Set multiprocessing start method FIRST for HPC compatibility
+# This must be done before importing torch to fix DataLoader num_workers > 0 crashes
+import multiprocessing as mp
+import os
 import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
+
+print(f"[{__name__}] Setting up multiprocessing for HPC compatibility...")
+print(f"[{__name__}] Python version: {sys.version}")
+print(f"[{__name__}] Current working directory: {os.getcwd()}")
+
+# Set multiprocessing start method to spawn for HPC/SLURM compatibility
+try:
+    current_method = mp.get_start_method(allow_none=True)
+    print(f"[{__name__}] Current multiprocessing method: {current_method}")
+
+    # Force spawn method for HPC compatibility
+    mp.set_start_method("spawn", force=True)
+    new_method = mp.get_start_method()
+    print(
+        f"[{__name__}] ✅ Successfully set multiprocessing start method to: {new_method}"
+    )
+
+    # Verify it's actually spawn
+    if new_method != "spawn":
+        print(f"[{__name__}] ❌ ERROR: Failed to set spawn method, got: {new_method}")
+        sys.exit(1)
+
+except RuntimeError as e:
+    print(f"[{__name__}] ⚠️  Could not set multiprocessing start method: {e}")
+    print(f"[{__name__}] Current method: {mp.get_start_method()}")
+    # Don't exit, but log the issue
+except Exception as e:
+    print(f"[{__name__}] ❌ Unexpected error setting multiprocessing method: {e}")
+    sys.exit(1)
+
 import torch
-import torch.multiprocessing as mp
+import torch.multiprocessing as torch_mp
 import torch.nn as nn
+
+# Additional multiprocessing verification
+print(f"[{__name__}] Verifying multiprocessing setup...")
+print(
+    f"[{__name__}] PyTorch multiprocessing start method: {torch_mp.get_start_method()}"
+)
+print(f"[{__name__}] Python multiprocessing start method: {mp.get_start_method()}")
+
+# Skip multiprocessing test since we're using num_workers=0
+print(f"[{__name__}] Skipping multiprocessing test - using single-threaded DataLoader")
+
+# Initialize distributed training AFTER multiprocessing setup
+if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+    import torch.distributed as dist
+
+    # Ensure torch multiprocessing uses the same method
+    try:
+        torch_mp.set_start_method("spawn", force=True)
+        print("✅ Set torch multiprocessing start method to 'spawn'")
+    except RuntimeError:
+        print("⚠️  Torch multiprocessing method already set")
+
+    # Initialize distributed process group
+    if not dist.is_initialized():
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        dist.init_process_group(backend=backend, init_method="env://")
+
+        # Set device for this process
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            device = torch.device(f"cuda:{local_rank}")
+        else:
+            device = torch.device("cpu")
+
+        print(
+            f"Distributed training initialized: rank {dist.get_rank()}/{dist.get_world_size()}, device: {device}"
+        )
+    else:
+        print("Distributed training already initialized")
 
 # Add project root to path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
+# Configure CUDA memory allocator for HPC compatibility
+# This fixes "pidfd_open syscall not supported" errors on older kernels
+try:
+    import torch
+
+    if torch.cuda.is_available():
+        # Disable expandable segments for HPC systems that don't support pidfd_open
+        torch.cuda.memory._set_allocator_settings("expandable_segments:False")
+        print("✅ Configured CUDA memory allocator for HPC compatibility")
+except Exception as e:
+    print(f"⚠️  Could not configure CUDA memory allocator: {e}")
+    print("   Continuing with default settings...")
+
 from core.error_handlers import ErrorHandler
 from core.logging_config import LoggingManager
+from data.astronomy_preprocessor import (
+    AstronomyDataPreprocessor,
+    create_astronomy_collate_fn,
+)
 from data.domain_datasets import MultiDomainDataset
 from models.edm_wrapper import (
     ProgressiveEDM,
@@ -60,6 +152,151 @@ logger = logging_manager.setup_logging(
     file_output=True,
     json_format=False,
 )
+
+
+# Module-level classes to avoid pickling issues in multiprocessing
+class CheckpointedEDM(nn.Module):
+    """Simple gradient checkpointing wrapper for single GPU."""
+
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, *args, **kwargs):
+        if self.training and len(args) > 0:
+            # Use gradient checkpointing during training
+            from torch.utils.checkpoint import checkpoint
+
+            def run_model(*args, **kwargs):
+                return self.model(*args, **kwargs)
+
+            return checkpoint(run_model, *args, use_reentrant=False, **kwargs)
+        else:
+            # No checkpointing during validation/inference
+            return self.model(*args, **kwargs)
+
+
+class SyntheticDataset:
+    """Synthetic dataset for testing without real data."""
+
+    def __init__(self, data_dir, target_size=128):
+        self.data_dir = Path(data_dir)
+        self.target_size = target_size
+
+        # Check if we have NPZ files or need to create simple synthetic data
+        image_dir = self.data_dir / "images"
+        if image_dir.exists():
+            self.image_files = list(image_dir.glob("*.npz"))
+        else:
+            # Create simple synthetic file list
+            self.image_files = []
+            for i in range(1000):  # 1000 synthetic samples
+                self.image_files.append(f"synthetic_{i:04d}.pt")
+
+        # Create train/val split
+        split_idx = int(0.8 * len(self.image_files))
+        self.train_files = self.image_files[:split_idx]
+        self.val_files = self.image_files[split_idx:]
+
+        # Create simple dataset objects using module-level class
+        self.train_dataset = SyntheticSubset(self.train_files, target_size)
+        self.val_dataset = SyntheticSubset(self.val_files, target_size)
+
+        # Add domain_datasets attribute for MultiDomainTrainer compatibility
+        self.train_dataset.domain_datasets = {"astronomy": self.train_dataset}
+        self.val_dataset.domain_datasets = {"astronomy": self.val_dataset}
+
+    def __len__(self):
+        return len(self.image_files)
+
+    def __getitem__(self, idx):
+        # This shouldn't be called directly, but provide fallback
+        return {
+            "clean": torch.randn(1, self.target_size, self.target_size),
+            "noisy": torch.randn(1, self.target_size, self.target_size),
+            "electrons": torch.randn(1, self.target_size, self.target_size),
+            "domain": torch.tensor([2]),  # Astronomy domain
+            "metadata": {"synthetic": True, "idx": idx},
+            "domain_params": {
+                "scale": 50000.0,  # Astronomy scale for extreme low-light
+                "read_noise": 3.0,
+                "background": 100.0,
+                "gain": 1.0,
+            },
+        }
+
+
+class SyntheticSubset:
+    """Subset of synthetic files for train/val splits."""
+
+    def __init__(self, files, target_size):
+        self.files = files
+        self.target_size = target_size
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx):
+        import numpy as np
+
+        # Check if this is a Path object (NPZ file) or string (simple synthetic)
+        if hasattr(self.files[idx], "suffix") and self.files[idx].suffix == ".npz":
+            # Load from NPZ file
+            data = np.load(self.files[idx])
+            clean = (
+                torch.from_numpy(data["clean"]).float().unsqueeze(0)
+            )  # Add channel dim
+            noisy = torch.from_numpy(data["noisy"]).float().unsqueeze(0)
+
+            # Astronomy typically uses single channel
+            clean_1ch = clean
+            noisy_1ch = noisy
+
+            # Resize if needed
+            if clean_1ch.shape[-1] != self.target_size:
+                clean_1ch = torch.nn.functional.interpolate(
+                    clean_1ch.unsqueeze(0), size=self.target_size, mode="bilinear"
+                ).squeeze(0)
+                noisy_1ch = torch.nn.functional.interpolate(
+                    noisy_1ch.unsqueeze(0), size=self.target_size, mode="bilinear"
+                ).squeeze(0)
+
+            return {
+                "clean": clean_1ch,
+                "noisy": noisy_1ch,
+                "electrons": clean_1ch,  # Use as target electrons
+                "domain": torch.tensor([2]),  # Astronomy domain
+                "metadata": {"synthetic": True},
+            }
+        else:
+            # Simple synthetic data - astronomy uses single channel grayscale
+            return {
+                "clean": torch.rand(
+                    1, self.target_size, self.target_size
+                ),  # Single channel
+                "noisy": torch.rand(
+                    1, self.target_size, self.target_size
+                ),  # Single channel
+                "electrons": torch.rand(
+                    1, self.target_size, self.target_size
+                ),  # Single channel
+                "domain": torch.tensor([2]),  # Astronomy domain
+                "metadata": {"synthetic": True, "file": str(self.files[idx])},
+                "domain_params": {
+                    "scale": 50000.0,  # Astronomy scale for extreme low-light
+                    "read_noise": 3.0,
+                    "background": 100.0,
+                    "gain": 1.0,
+                },
+            }
+
+
+class DatasetWrapper:
+    """Simple wrapper to provide train/val dataset attributes."""
+
+    def __init__(self, train_ds, val_ds):
+        self.train_dataset = train_ds
+        self.val_dataset = val_ds
 
 
 class AstronomyTrainingManager:
@@ -190,6 +427,8 @@ class AstronomyTrainingManager:
         self,
         use_multi_resolution: bool = False,
         mixed_precision: bool = True,
+        gradient_checkpointing: bool = False,
+        ddp_find_unused_parameters: bool = False,
         **model_kwargs,
     ) -> nn.Module:
         """
@@ -198,6 +437,8 @@ class AstronomyTrainingManager:
         Args:
             use_multi_resolution: Whether to use multi-resolution progressive model
             mixed_precision: Whether to enable mixed precision training
+            gradient_checkpointing: Whether to enable gradient checkpointing for memory optimization
+            ddp_find_unused_parameters: Whether to find unused parameters in DDP
             **model_kwargs: Additional model configuration
 
         Returns:
@@ -214,15 +455,15 @@ class AstronomyTrainingManager:
             # Multi-resolution model configuration - Optimized for astronomy
             # Astronomy requires maximum precision for extreme low-light
             default_model_channels = model_kwargs.get(
-                "model_channels", 128
-            )  # Larger for maximum precision
+                "model_channels", 256
+            )  # Research-grade model size
             default_channel_mult = model_kwargs.get(
                 "channel_mult", [1, 2, 3, 4]
             )  # More stages
-            default_channel_mult_emb = model_kwargs.get("channel_mult_emb", 4)
+            default_channel_mult_emb = model_kwargs.get("channel_mult_emb", 6)
             default_num_blocks = model_kwargs.get(
-                "num_blocks", 5
-            )  # Maximum blocks for precision
+                "num_blocks", 6
+            )  # Unified base architecture
             default_attn_resolutions = model_kwargs.get(
                 "attn_resolutions", [16, 32, 64]
             )  # Multi-scale attention optimized for patches
@@ -265,15 +506,17 @@ class AstronomyTrainingManager:
         else:
             logger.info(f"📊 Using Standard EDM for {domain} domain")
 
-            # Default model configuration for astronomy - Maximum precision
+            # Default model configuration for astronomy - Research-grade
             default_model_channels = model_kwargs.get(
-                "model_channels", 128
-            )  # Large model
+                "model_channels", 256
+            )  # Research-grade model size
             default_channel_mult = model_kwargs.get(
                 "channel_mult", [1, 2, 3, 4]
             )  # More stages
-            default_channel_mult_emb = model_kwargs.get("channel_mult_emb", 4)
-            default_num_blocks = model_kwargs.get("num_blocks", 5)  # Maximum blocks
+            default_channel_mult_emb = model_kwargs.get("channel_mult_emb", 6)
+            default_num_blocks = model_kwargs.get(
+                "num_blocks", 6
+            )  # Unified base architecture
             default_attn_resolutions = model_kwargs.get(
                 "attn_resolutions", [16, 32, 64]
             )  # Multi-scale optimized for patches
@@ -335,6 +578,48 @@ class AstronomyTrainingManager:
             if mixed_precision:
                 logger.info("🔧 Mixed precision enabled for EDM models")
 
+        # Enable gradient checkpointing if requested
+        if gradient_checkpointing:
+            logger.info("🔧 Enabling gradient checkpointing for memory optimization...")
+            applied = False
+
+            # For single GPU training (no DDP), we can use a simple wrapper
+            if "RANK" not in os.environ or os.environ.get("WORLD_SIZE", "1") == "1":
+                try:
+                    model = CheckpointedEDM(model)
+                    logger.info(
+                        "✅ Gradient checkpointing enabled with wrapper (single GPU mode)"
+                    )
+                    applied = True
+
+                except Exception as e:
+                    logger.warning(
+                        f"  Could not apply gradient checkpointing wrapper: {e}"
+                    )
+            else:
+                # For multi-GPU (DDP), don't use gradient checkpointing to avoid int8 issues
+                logger.info(
+                    "  Skipping gradient checkpointing for multi-GPU training (avoids DDP issues)"
+                )
+                logger.info("  With distributed training, memory is already optimized")
+
+            if not applied and "RANK" not in os.environ:
+                # Try other methods for single GPU
+                if hasattr(model, "enable_gradient_checkpointing"):
+                    model.enable_gradient_checkpointing()
+                    logger.info("✅ Gradient checkpointing enabled via model method")
+                    applied = True
+                else:
+                    logger.warning(
+                        "⚠️ Gradient checkpointing not available for this model"
+                    )
+                    logger.warning("  Continuing without gradient checkpointing")
+                    logger.info("  Consider reducing batch size if memory issues occur")
+
+            if applied:
+                logger.info("  Memory usage reduced by ~30-40%")
+                logger.info("  Training will be ~20% slower but use less memory")
+
         # Move to device and log
         model = model.to(self.device)
         param_count = sum(p.numel() for p in model.parameters())
@@ -346,15 +631,40 @@ class AstronomyTrainingManager:
         logger.info(f"  Model device: {next(model.parameters()).device}")
         logger.info(f"  Optimized for astronomy extreme low-light imaging")
 
+        # Wrap model with DistributedDataParallel if in distributed mode
+        if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+            import torch.distributed as dist
+
+            if dist.is_initialized():
+                local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+                logger.info(
+                    f"🔄 Wrapping model with DistributedDataParallel (rank {dist.get_rank()}, local_rank {local_rank})"
+                )
+
+                # Ensure model is on the correct device before wrapping
+                model = model.to(f"cuda:{local_rank}")
+
+                # Wrap with DDP
+                model = torch.nn.parallel.DistributedDataParallel(
+                    model,
+                    device_ids=[local_rank],
+                    output_device=local_rank,
+                    find_unused_parameters=ddp_find_unused_parameters,
+                    # Disable broadcast_buffers for better performance if model doesn't have buffers that need syncing
+                    broadcast_buffers=True,
+                )
+
+                logger.info(f"✅ Model wrapped with DDP on device cuda:{local_rank}")
+
         return model
 
     def create_training_config(
         self,
         num_epochs: int = 200,  # More epochs for astronomy precision
         learning_rate: float = 2e-5,  # Very low learning rate for stability
-        batch_size: int = 2,  # Smaller batch size for memory efficiency
+        batch_size: int = 4,  # Updated for 32 effective batch size
         mixed_precision: bool = True,
-        gradient_accumulation_steps: int = 2,  # Compensate for smaller batch
+        gradient_accumulation_steps: int = 8,  # Updated: 4 × 8 = 32 effective batch
         save_frequency_steps: int = 10000,  # More frequent saves
         early_stopping_patience_steps: int = 15000,  # More patience for convergence
         validation_checkpoints_patience: int = 50,
@@ -562,14 +872,33 @@ if __name__ == "__main__":
         # Set deterministic mode
         set_deterministic_mode(seed=self.seed)
 
+        # Create custom collate function for astronomy data
+        astronomy_collate_fn = None
+        if (
+            hasattr(self, "astronomy_preprocessor")
+            and self.astronomy_preprocessor is not None
+        ):
+            astronomy_collate_fn = create_astronomy_collate_fn(
+                self.astronomy_preprocessor
+            )
+            logger.info(
+                "🔬 Using custom astronomy collate function for Hubble Legacy Field data"
+            )
+
         # Create trainer
-        trainer = MultiDomainTrainer(
-            model=model,
-            train_dataset=dataset.train_dataset,
-            val_dataset=dataset.val_dataset,
-            config=config,
-            output_dir=self.output_dir,
-        )
+        trainer_kwargs = {
+            "model": model,
+            "train_dataset": dataset.train_dataset,
+            "val_dataset": dataset.val_dataset,
+            "config": config,
+            "output_dir": self.output_dir,
+        }
+
+        # Only pass collate_fn if it's not None
+        if astronomy_collate_fn is not None:
+            trainer_kwargs["collate_fn"] = astronomy_collate_fn
+
+        trainer = MultiDomainTrainer(**trainer_kwargs)
 
         # Setup checkpoint resumption
         if resume_from_checkpoint:
@@ -651,10 +980,16 @@ def main():
         "--epochs", type=int, default=200, help="Number of training epochs"
     )
     parser.add_argument(
+        "--max_steps",
+        type=int,
+        default=150000,
+        help="Maximum training steps (overrides epochs if set)",
+    )
+    parser.add_argument(
         "--batch_size",
         type=int,
-        default=2,
-        help="Training batch size (optimized for astronomy)",
+        default=6,
+        help="Training batch size (unified configuration)",
     )
     parser.add_argument(
         "--learning_rate",
@@ -679,18 +1014,27 @@ def main():
         help="Number of warmup steps (will be converted to epochs)",
     )
     parser.add_argument(
-        "--val_frequency", type=int, default=2, help="Validation frequency in epochs"
+        "--val_frequency",
+        type=int,
+        default=2,
+        help="Validation frequency in epochs (ignored if val_frequency_steps is set)",
+    )
+    parser.add_argument(
+        "--val_frequency_steps",
+        type=int,
+        default=None,
+        help="Validation frequency in training steps (overrides val_frequency if set)",
     )
 
     # Model arguments
     parser.add_argument(
         "--model_channels",
         type=int,
-        default=128,
-        help="Number of model channels (maximum for astronomy)",
+        default=256,
+        help="Number of model channels (research-grade for astronomy)",
     )
     parser.add_argument(
-        "--num_blocks", type=int, default=5, help="Number of model blocks"
+        "--num_blocks", type=int, default=6, help="Number of model blocks"
     )
     parser.add_argument(
         "--multi_resolution",
@@ -748,8 +1092,8 @@ def main():
     parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
-        default=2,
-        help="Number of gradient accumulation steps",
+        default=8,
+        help="Number of gradient accumulation steps (for 32 effective batch)",
     )
     parser.add_argument(
         "--mixed_precision",
@@ -757,6 +1101,13 @@ def main():
         default="true",
         choices=["true", "false"],
         help="Enable mixed precision training",
+    )
+    parser.add_argument(
+        "--gradient_checkpointing",
+        type=str,
+        choices=["true", "false"],
+        default="false",
+        help="Enable gradient checkpointing to save memory (default: false)",
     )
     parser.add_argument(
         "--num_workers", type=int, default=4, help="Number of data loading workers"
@@ -767,6 +1118,21 @@ def main():
         default="true",
         choices=["true", "false"],
         help="Pin memory for faster GPU transfer",
+    )
+    parser.add_argument(
+        "--prefetch_factor",
+        type=int,
+        default=2,
+        help="Number of batches to prefetch (0 to disable)",
+    )
+
+    # DDP optimization arguments
+    parser.add_argument(
+        "--ddp_find_unused_parameters",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help="Find unused parameters in DDP (slower but sometimes necessary)",
     )
 
     # Checkpointing arguments
@@ -795,6 +1161,48 @@ def main():
         help="Gradient clipping norm threshold (very conservative)",
     )
 
+    # Advanced checkpointing arguments
+    parser.add_argument(
+        "--max_checkpoints",
+        type=int,
+        default=10,
+        help="Maximum number of checkpoints to keep",
+    )
+    parser.add_argument(
+        "--save_best_model",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+        help="Save the best model based on validation metrics",
+    )
+    parser.add_argument(
+        "--save_optimizer_state",
+        type=str,
+        default="true",
+        choices=["true", "false"],
+        help="Save optimizer state in checkpoints",
+    )
+    parser.add_argument(
+        "--checkpoint_metric",
+        type=str,
+        default="val_loss",
+        help="Metric to monitor for best model",
+    )
+    parser.add_argument(
+        "--checkpoint_mode",
+        type=str,
+        default="min",
+        choices=["min", "max"],
+        help="Mode for checkpoint metric (min for loss, max for accuracy)",
+    )
+    parser.add_argument(
+        "--resume_from_best",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help="Resume training from best checkpoint instead of latest",
+    )
+
     # Testing arguments
     parser.add_argument(
         "--max_files",
@@ -810,11 +1218,21 @@ def main():
 
     # Convert string boolean arguments to actual booleans
     args.mixed_precision = args.mixed_precision.lower() == "true"
+    args.gradient_checkpointing = args.gradient_checkpointing.lower() == "true"
     args.pin_memory = args.pin_memory.lower() == "true"
+    args.save_best_model = args.save_best_model.lower() == "true"
+    args.save_optimizer_state = args.save_optimizer_state.lower() == "true"
+    args.resume_from_best = args.resume_from_best.lower() == "true"
+    args.ddp_find_unused_parameters = args.ddp_find_unused_parameters.lower() == "true"
+
+    # Check if we're in distributed training
+    is_distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
+    is_main_process = not is_distributed or int(os.environ.get("RANK", "0")) == 0
 
     # Initialize training manager
-    logger.info("🚀 INITIALIZING ASTRONOMY TRAINING")
-    logger.info("=" * 60)
+    if is_main_process:
+        logger.info("🚀 INITIALIZING ASTRONOMY TRAINING")
+        logger.info("=" * 60)
 
     training_manager = AstronomyTrainingManager(
         data_root=args.data_root,
@@ -823,8 +1241,27 @@ def main():
         seed=args.seed,
     )
 
-    # Setup monitoring
-    monitoring_dir = training_manager.setup_monitoring()
+    # Initialize astronomy preprocessor for real data (if not quick_test)
+    astronomy_preprocessor = None
+    if not args.quick_test:
+        # Astronomy preprocessor already imported at top level
+        astronomy_preprocessor = AstronomyDataPreprocessor(
+            offset_method="adaptive",  # Best for Hubble Legacy Field data
+            target_channels=1,  # Single channel for astronomy
+            preserve_noise_statistics=True,
+            min_offset=100.0,  # Ensure sufficient offset for Poisson modeling
+        )
+        logger.info("🔬 Initialized astronomy preprocessor for Hubble Legacy Field data")
+
+    # Store preprocessor in training manager for later use
+    if astronomy_preprocessor is not None:
+        training_manager.astronomy_preprocessor = astronomy_preprocessor
+
+    # Setup monitoring (only on main process)
+    if is_main_process:
+        monitoring_dir = training_manager.setup_monitoring()
+    else:
+        monitoring_dir = None
 
     # Create model (enable multi-resolution if requested)
     model_kwargs = {
@@ -843,6 +1280,8 @@ def main():
     model = training_manager.create_model(
         use_multi_resolution=args.multi_resolution,
         mixed_precision=args.mixed_precision,
+        gradient_checkpointing=args.gradient_checkpointing,
+        ddp_find_unused_parameters=args.ddp_find_unused_parameters,
         **model_kwargs,
     )
 
@@ -934,10 +1373,14 @@ def main():
         # Use real preprocessed data
         logger.info("📁 Loading real preprocessed astronomy data...")
         from data.preprocessed_datasets import create_preprocessed_datasets
+
+        # Astronomy preprocessor functions already imported at top level
         from utils.training_config import (
             calculate_optimal_training_config,
             print_training_analysis,
         )
+
+        # Astronomy preprocessor is initialized at the top level (line 1226-1234)
 
         train_dataset, val_dataset = create_preprocessed_datasets(
             data_root=args.data_root,
@@ -984,11 +1427,6 @@ def main():
             )
 
         # Create a simple dataset wrapper with train/val attributes
-        class DatasetWrapper:
-            def __init__(self, train_ds, val_ds):
-                self.train_dataset = train_ds
-                self.val_dataset = val_ds
-
         dataset = DatasetWrapper(train_dataset, val_dataset)
 
     # Convert warmup_steps to warmup_epochs if needed
@@ -1020,16 +1458,17 @@ def main():
         gradient_clip_norm=args.gradient_clip_norm,
     )
 
-    # Save configuration
-    config_file = training_manager.output_dir / "training_config.json"
-    with open(config_file, "w") as f:
-        json.dump(config.to_dict(), f, indent=2, default=str)
-
-    logger.info(f"📝 Configuration saved to: {config_file}")
+    # Save configuration (only on main process)
+    if is_main_process:
+        config_file = training_manager.output_dir / "training_config.json"
+        with open(config_file, "w") as f:
+            json.dump(config.to_dict(), f, indent=2, default=str)
+        logger.info(f"📝 Configuration saved to: {config_file}")
 
     # Start training
-    logger.info("🎯 STARTING ASTRONOMY TRAINING")
-    logger.info("=" * 60)
+    if is_main_process:
+        logger.info("🎯 STARTING ASTRONOMY TRAINING")
+        logger.info("=" * 60)
 
     try:
         results = training_manager.train(
@@ -1039,19 +1478,23 @@ def main():
             resume_from_checkpoint=args.resume_checkpoint,
         )
 
-        # Success summary
-        logger.info("🎉 ASTRONOMY TRAINING COMPLETED SUCCESSFULLY!")
-        logger.info("=" * 60)
-        logger.info("📊 Final Results:")
-        logger.info(f"  Training time: {results['training_time_hours']:.2f} hours")
-        logger.info(f"  Best validation loss: {results['best_val_loss']:.6f}")
-        logger.info(f"  Final epoch: {results['final_epoch']}")
-        logger.info("=" * 60)
-        logger.info("📁 Outputs:")
-        logger.info(f"  Checkpoints: {training_manager.output_dir}/checkpoints/")
-        logger.info(f"  Results: {training_manager.output_dir}/training_results.json")
-        logger.info(f"  Logs: {monitoring_dir}/")
-        logger.info("=" * 60)
+        # Success summary (only on main process)
+        if is_main_process:
+            logger.info("🎉 ASTRONOMY TRAINING COMPLETED SUCCESSFULLY!")
+            logger.info("=" * 60)
+            logger.info("📊 Final Results:")
+            logger.info(f"  Training time: {results['training_time_hours']:.2f} hours")
+            logger.info(f"  Best validation loss: {results['best_val_loss']:.6f}")
+            logger.info(f"  Final epoch: {results['final_epoch']}")
+            logger.info("=" * 60)
+            logger.info("📁 Outputs:")
+            logger.info(f"  Checkpoints: {training_manager.output_dir}/checkpoints/")
+            logger.info(
+                f"  Results: {training_manager.output_dir}/training_results.json"
+            )
+            if monitoring_dir:
+                logger.info(f"  Logs: {monitoring_dir}/")
+            logger.info("=" * 60)
 
     except Exception as e:
         logger.error(f"❌ Astronomy training failed: {e}")

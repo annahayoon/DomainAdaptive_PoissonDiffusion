@@ -1,0 +1,7 @@
+{
+  "error": "Caught RuntimeError in DataLoader worker process 0.\nOriginal Traceback (most recent call last):\n  File \"/home/jilab/miniconda3/lib/python3.12/site-packages/torch/utils/data/_utils/worker.py\", line 349, in _worker_loop\n    data = fetcher.fetch(index)  # type: ignore[possibly-undefined]\n           ^^^^^^^^^^^^^^^^^^^^\n  File \"/home/jilab/miniconda3/lib/python3.12/site-packages/torch/utils/data/_utils/fetch.py\", line 55, in fetch\n    return self.collate_fn(data)\n           ^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/jilab/Jae/poisson_training/multi_domain_trainer.py\", line 68, in _default_collate_fn\n    collated[field] = torch.stack(values)\n                      ^^^^^^^^^^^^^^^^^^^\nRuntimeError: stack expects each tensor to be equal size, but got [4, 128, 128] at entry 0 and [1, 128, 128] at entry 3\n",
+  "training_time_hours": 0.0036056719885932073,
+  "failed_epoch": 0,
+  "device": "cuda",
+  "domain": "astronomy"
+}

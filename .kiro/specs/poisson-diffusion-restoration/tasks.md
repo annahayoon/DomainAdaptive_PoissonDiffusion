@@ -209,29 +209,59 @@
   - ✅ **Validate progressive training stability and quality** - Ready for validation
   - _Requirements: 6.1, 8.5_
 
-## Phase 9: Deployment & Documentation (Week 9-10)
+## Phase 9: L2-Guided Diffusion Baseline Implementation (Week 9)
 
-- [ ] 9.1 Create user-friendly scripts
+- [ ] 9.1 Implement L2 guidance system
+  - Create L2Guidance class with identical interface to PoissonGuidance
+  - Implement simple MSE-based likelihood gradient computation
+  - Add identical gamma scheduling for fair comparison
+  - **Test numerical stability and gradient clipping**
+  - _Requirements: Critical for paper submission_
+
+- [ ] 9.2 Create unified guidance architecture
+  - Abstract GuidanceComputer interface for polymorphic guidance
+  - Guidance factory system for creating Poisson vs L2 guidance
+  - Enhanced configuration system supporting guidance type selection
+  - **Ensure identical sampling pipeline for both guidance types**
+  - _Requirements: Scientific rigor and code maintainability_
+
+- [ ] 9.3 Integrate L2 baseline into training pipeline
+  - Unified training script supporting both guidance types
+  - Configuration files for L2 baseline experiments
+  - Identical hyperparameters except guidance computation
+  - **Deterministic training with same random seeds for fair comparison**
+  - _Requirements: Perfect ablation study_
+
+- [ ] 9.4 Enhance evaluation framework for L2 comparison
+  - UnifiedDiffusionBaseline class supporting both guidance types
+  - Comparative evaluation scripts for Poisson vs L2
+  - Statistical significance testing for guidance contribution
+  - **Physics metrics validation (χ² analysis for both methods)**
+  - _Requirements: Academic paper submission_
+
+## Phase 10: Deployment & Documentation (Week 10-11)
+
+- [ ] 10.1 Create user-friendly scripts
   - train_prior.py with configuration management and multi-GPU support
   - evaluate.py with comprehensive reporting and baseline comparisons
   - denoise.py for single image inference with automatic domain detection
   - batch_process.py for dataset processing with progress tracking
   - _Requirements: 6.2, 7.4_
 
-- [ ] 9.2 Package models and data
+- [ ] 10.2 Package models and data
   - Train final models for photography, microscopy, and astronomy domains
   - Create model zoo with automatic download and caching system
   - Package example datasets with proper calibration files and checksums
   - _Requirements: 8.2_
 
-- [ ] 9.3 Write comprehensive documentation
+- [ ] 10.3 Write comprehensive documentation
   - Installation guide with environment setup and dependency management
   - API reference documentation for all major classes and functions
   - Domain-specific tutorials with real examples from each field
   - Troubleshooting guide for common issues and error messages
   - _Requirements: 8.6_
 
-- [ ] 9.4 Create reproducibility package
+- [ ] 10.4 Create reproducibility package
   - Fixed seeds and deterministic configurations for all experiments
   - Dataset checksums and validation for data integrity
   - Exact dependency versions and environment specifications

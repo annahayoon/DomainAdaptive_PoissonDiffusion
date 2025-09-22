@@ -215,7 +215,29 @@ class ImageMetadata:
 - [ ] Training logs and configs
 - [ ] Evaluation protocols
 
-### Requirement 9: Error Handling and Robustness
+### Requirement 9: L2-Guided Diffusion Baseline Implementation
+
+**User Story:** As a researcher preparing for academic publication, I want a scientifically rigorous L2-guided diffusion baseline that shares all infrastructure with the Poisson-Gaussian method except the guidance computation, enabling a perfect ablation study.
+
+#### Acceptance Criteria
+
+1. **Identical Architecture**: WHEN training L2 baseline THEN the system SHALL use identical model architecture, conditioning, and training pipeline as Poisson-Gaussian method
+2. **Guidance Interface Abstraction**: WHEN implementing guidance methods THEN the system SHALL use abstract GuidanceComputer interface allowing polymorphic guidance selection
+3. **Fair Comparison Setup**: WHEN comparing methods THEN the system SHALL use identical random seeds, hyperparameters, data splits, and evaluation protocols
+4. **L2 Guidance Implementation**: WHEN computing L2 guidance THEN the system SHALL use simple MSE gradient: ∇ log p(y|x) = scale * (y - prediction) / noise_variance
+5. **Identical Scheduling**: WHEN applying guidance weights THEN L2 baseline SHALL use identical gamma scheduling as Poisson-Gaussian for fair comparison
+6. **Configuration-Driven Selection**: WHEN switching guidance types THEN the system SHALL support config-based selection between "poisson" and "l2" guidance
+7. **Statistical Validation**: WHEN evaluating methods THEN the system SHALL compute χ² consistency metrics showing Poisson ≈ 1.0 and L2 > 1.3
+8. **Unified Evaluation**: WHEN running baselines THEN the system SHALL support both guidance types through unified baseline framework
+
+#### L2 Guidance Specifications
+- **Mathematical Model**: Assumes y ~ N(s·x + b, σ²) with uniform noise variance
+- **Gradient Computation**: ∇ log p(y|x) = s·(y - s·x - b) / σ²
+- **Scheduling**: γ(σ) = κ·σ² (identical to Poisson-Gaussian)
+- **Numerical Stability**: Same gradient clipping and stability measures as Poisson-Gaussian
+- **Interface Compatibility**: Identical function signatures and return types as PoissonGuidance
+
+### Requirement 10: Error Handling and Robustness
 
 **User Story:** As a user working with imperfect data, I want the system to handle edge cases gracefully.
 

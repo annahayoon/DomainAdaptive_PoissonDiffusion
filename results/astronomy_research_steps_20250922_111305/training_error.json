@@ -1,0 +1,7 @@
+{
+  "error": "CUDA out of memory. Tried to allocate 96.00 MiB. GPU 0 has a total capacity of 44.45 GiB of which 97.25 MiB is free. Including non-PyTorch memory, this process has 39.25 GiB memory in use. Process 1481573 has 4.83 GiB memory in use. Process 1481574 has 260.00 MiB memory in use. Of the allocated memory 37.90 GiB is allocated by PyTorch, and 1010.01 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)",
+  "training_time_hours": 0.017652656634648642,
+  "failed_epoch": 0,
+  "device": "cuda",
+  "domain": "astronomy"
+}

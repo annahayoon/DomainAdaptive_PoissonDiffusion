@@ -1,0 +1,6 @@
+{
+  "error": "Can't pickle local object 'main.<locals>.SimpleMultiDomainDataset'",
+  "training_time_hours": 1.3311041726006401e-06,
+  "failed_epoch": 0,
+  "device": "cuda"
+}
