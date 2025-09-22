@@ -188,6 +188,14 @@ class DeterministicTrainer:
         self.val_dataloader = val_dataloader
         self.config = config or TrainingConfig()
 
+        # Register cleanup handler for graceful shutdown
+        import atexit
+        import signal
+
+        atexit.register(self._cleanup_resources)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
+
         # Setup device
         self.device = self._setup_device()
         self.model = self.model.to(self.device)
@@ -253,9 +261,102 @@ class DeterministicTrainer:
         """Create a list for defaultdict factory (pickle-safe)."""
         return list()
 
+    def _cleanup_resources(self):
+        """Clean up resources to prevent leaks."""
+        try:
+            # Clean up DataLoader iterators
+            for dataloader in [self.train_dataloader, self.val_dataloader]:
+                if dataloader is not None and hasattr(dataloader, "_iterator"):
+                    if dataloader._iterator is not None:
+                        if hasattr(dataloader._iterator, "_shutdown_workers"):
+                            dataloader._iterator._shutdown_workers()
+                        del dataloader._iterator
+                        dataloader._iterator = None
+
+            # Clean up TensorBoard writer
+            if hasattr(self, "writer") and self.writer is not None:
+                self.writer.close()
+                self.writer = None
+
+            # Force garbage collection
+            import gc
+
+            gc.collect()
+
+            logger.info("Resources cleaned up successfully")
+        except Exception as e:
+            logger.warning(f"Error during resource cleanup: {e}")
+
+    def _signal_handler(self, signum, frame):
+        """Handle termination signals gracefully."""
+        logger.info(f"Received signal {signum}, cleaning up...")
+        self._cleanup_resources()
+        import sys
+
+        sys.exit(0)
+
+    def _is_distributed(self) -> bool:
+        """Check if running in distributed mode."""
+        return "RANK" in os.environ and "WORLD_SIZE" in os.environ
+
+    def _is_main_process(self) -> bool:
+        """Check if this is the main process (rank 0)."""
+        if not self._is_distributed():
+            return True
+        import torch.distributed as dist
+
+        return dist.is_initialized() and dist.get_rank() == 0
+
+    def _synchronize_processes(self):
+        """Synchronize all processes in distributed training."""
+        if self._is_distributed():
+            import torch.distributed as dist
+
+            if dist.is_initialized():
+                dist.barrier()
+
+    def _gather_validation_metrics(
+        self, local_metrics: Dict[str, float]
+    ) -> Dict[str, float]:
+        """Gather and average validation metrics across all processes."""
+        if not self._is_distributed():
+            return local_metrics
+
+        import torch.distributed as dist
+
+        if not dist.is_initialized():
+            return local_metrics
+
+        # Convert metrics to tensors for distributed operations
+        gathered_metrics = {}
+
+        for key, value in local_metrics.items():
+            # Create tensor on the correct device for the backend being used
+            if dist.get_backend() == "nccl" and torch.cuda.is_available():
+                # NCCL requires CUDA tensors
+                metric_tensor = torch.tensor(
+                    value, dtype=torch.float32, device=self.device
+                )
+            else:
+                # Gloo backend can work with CPU tensors
+                metric_tensor = torch.tensor(value, dtype=torch.float32, device="cpu")
+
+            # All-reduce to sum across processes
+            dist.all_reduce(metric_tensor, op=dist.ReduceOp.SUM)
+
+            # Average across processes
+            averaged_value = metric_tensor.item() / dist.get_world_size()
+            gathered_metrics[key] = averaged_value
+
+        return gathered_metrics
+
     def _get_writer(self):
         """Lazily initialize SummaryWriter to avoid pickling issues."""
         if self.writer is None:
+            # Ensure the tensorboard directory exists
+            from pathlib import Path
+
+            Path(self._tensorboard_log_dir).mkdir(parents=True, exist_ok=True)
             self.writer = SummaryWriter(self._tensorboard_log_dir)
         return self.writer
 
@@ -444,9 +545,18 @@ class DeterministicTrainer:
 
             # Gradient accumulation
             if (self.global_step + 1) % self.config.accumulate_grad_batches == 0:
+                # Unscale gradients before clipping
+                self.scaler.unscale_(self.optimizer)
+
+                # NaN gradient protection (from EDM)
+                for param in self.model.parameters():
+                    if param.grad is not None:
+                        torch.nan_to_num(
+                            param.grad, nan=0, posinf=1e5, neginf=-1e5, out=param.grad
+                        )
+
                 # Gradient clipping
                 if self.config.max_grad_norm > 0:
-                    self.scaler.unscale_(self.optimizer)
                     torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(), self.config.max_grad_norm
                     )
@@ -459,6 +569,13 @@ class DeterministicTrainer:
 
             # Gradient accumulation
             if (self.global_step + 1) % self.config.accumulate_grad_batches == 0:
+                # NaN gradient protection (from EDM)
+                for param in self.model.parameters():
+                    if param.grad is not None:
+                        torch.nan_to_num(
+                            param.grad, nan=0, posinf=1e5, neginf=-1e5, out=param.grad
+                        )
+
                 # Gradient clipping
                 if self.config.max_grad_norm > 0:
                     torch.nn.utils.clip_grad_norm_(
@@ -478,6 +595,19 @@ class DeterministicTrainer:
             for k, v in loss_dict.items()
         }
         loss_dict["total_loss"] = total_loss.item()
+
+        # Check for NaN loss and log warning
+        if math.isnan(loss_dict["total_loss"]) or math.isinf(loss_dict["total_loss"]):
+            logger.warning(
+                f"NaN or Inf loss detected at step {self.global_step}: {loss_dict}"
+            )
+            # Return a safe loss value to continue training
+            loss_dict["total_loss"] = 100.0
+            for key in loss_dict:
+                if isinstance(loss_dict[key], float) and (
+                    math.isnan(loss_dict[key]) or math.isinf(loss_dict[key])
+                ):
+                    loss_dict[key] = 100.0
 
         return loss_dict
 
@@ -678,7 +808,7 @@ class DeterministicTrainer:
 
     def validate_epoch(self) -> Dict[str, float]:
         """
-        Validate for one epoch.
+        Validate for one epoch with distributed synchronization.
 
         Returns:
             Dictionary of average validation losses
@@ -686,37 +816,69 @@ class DeterministicTrainer:
         if self.val_dataloader is None:
             return {}
 
+        # Synchronize all processes before validation
+        self._synchronize_processes()
+
         # Use EMA model for validation if available
         model = self.ema_model if self.ema_model is not None else self.model
         model.eval()
 
         epoch_losses = defaultdict(self._create_list)
 
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(self.val_dataloader):
+        try:
+            with torch.no_grad():
+                for batch_idx, batch in enumerate(self.val_dataloader):
+                    try:
+                        # Validation step
+                        loss_dict = self.val_step(batch)
+
+                        # Accumulate losses
+                        for key, value in loss_dict.items():
+                            epoch_losses[key].append(value)
+
+                        # Update metrics
+                        self.metrics.update(loss_dict, phase="val")
+
+                    except Exception as e:
+                        logger.error(f"Error in validation step {batch_idx}: {e}")
+                        continue
+        finally:
+            # Critical: Clean up DataLoader iterator to prevent resource leaks
+            # This is especially important with num_workers > 0
+            if (
+                hasattr(self.val_dataloader, "_iterator")
+                and self.val_dataloader._iterator is not None
+            ):
                 try:
-                    # Validation step
-                    loss_dict = self.val_step(batch)
-
-                    # Accumulate losses
-                    for key, value in loss_dict.items():
-                        epoch_losses[key].append(value)
-
-                    # Update metrics
-                    self.metrics.update(loss_dict, phase="val")
-
+                    # Properly shutdown workers if they exist
+                    if hasattr(self.val_dataloader._iterator, "_shutdown_workers"):
+                        self.val_dataloader._iterator._shutdown_workers()
+                    del self.val_dataloader._iterator
+                    self.val_dataloader._iterator = None
                 except Exception as e:
-                    logger.error(f"Error in validation step {batch_idx}: {e}")
-                    continue
+                    logger.warning(f"Error cleaning up validation DataLoader: {e}")
 
-        # Calculate epoch averages
-        epoch_avg_losses = {
+            # Force garbage collection to release semaphores
+            import gc
+
+            gc.collect()
+
+        # Calculate local epoch averages
+        local_avg_losses = {
             key: np.mean(values) for key, values in epoch_losses.items()
         }
 
-        # TensorBoard logging
-        for key, value in epoch_avg_losses.items():
-            self._get_writer().add_scalar(f"val/{key}", value, self.current_epoch)
+        # Gather and average validation metrics across all processes
+        epoch_avg_losses = self._gather_validation_metrics(local_avg_losses)
+
+        # Only log on main process to avoid duplicate logs
+        if self._is_main_process():
+            # TensorBoard logging
+            for key, value in epoch_avg_losses.items():
+                self._get_writer().add_scalar(f"val/{key}", value, self.current_epoch)
+
+        # Synchronize all processes after validation
+        self._synchronize_processes()
 
         return epoch_avg_losses
 
@@ -783,16 +945,26 @@ class DeterministicTrainer:
 
     def save_checkpoint(self, is_best: bool = False, extra_info: Optional[Dict] = None):
         """
-        Save training checkpoint.
+        Save training checkpoint (only on main process in distributed training).
 
         Args:
             is_best: Whether this is the best checkpoint
             extra_info: Additional information to save
         """
+        # Only save checkpoints on the main process in distributed training
+        if not self._is_main_process():
+            return
+
+        # Get the actual model state dict (unwrap DDP if necessary)
+        model_state_dict = self.model.state_dict()
+        if hasattr(self.model, "module"):
+            # If wrapped with DDP, get the underlying model
+            model_state_dict = self.model.module.state_dict()
+
         checkpoint_data = {
             "epoch": self.current_epoch,
             "global_step": self.global_step,
-            "model_state_dict": self.model.state_dict(),
+            "model_state_dict": model_state_dict,
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict()
             if self.scheduler
@@ -812,7 +984,10 @@ class DeterministicTrainer:
 
         # Add EMA model if available
         if self.ema_model is not None:
-            checkpoint_data["ema_model_state_dict"] = self.ema_model.state_dict()
+            ema_state_dict = self.ema_model.state_dict()
+            if hasattr(self.ema_model, "module"):
+                ema_state_dict = self.ema_model.module.state_dict()
+            checkpoint_data["ema_model_state_dict"] = ema_state_dict
 
         # Add scaler state if using mixed precision
         if self.scaler is not None:
