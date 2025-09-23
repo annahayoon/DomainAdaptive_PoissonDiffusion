@@ -995,6 +995,127 @@ class L2GuidedDiffusionBaseline(BaselineMethod):
         return {"guidance_type": "L2", "model_type": "EDM"}
 
 
+class UnifiedDiffusionBaseline(BaselineMethod):
+    """
+    Unified diffusion baseline supporting both Poisson and L2 guidance.
+
+    This baseline allows direct comparison between guidance methods using
+    identical model architectures and sampling procedures.
+    """
+
+    def __init__(
+        self,
+        model_path: str,
+        guidance_type: str,  # "poisson" or "l2"
+        device: str = "cuda",
+    ):
+        self.model_path = model_path
+        self.guidance_type = guidance_type
+        name = f"{guidance_type.upper()}-Guided-Diffusion"
+        super().__init__(name, device)
+
+        if self.is_available:
+            self.model = self._load_model()
+
+    def _check_availability(self) -> bool:
+        """Check if model checkpoint exists."""
+        return Path(self.model_path).exists()
+
+    def _load_model(self):
+        """Load the trained diffusion model."""
+        try:
+            from models.edm_wrapper import load_pretrained_edm
+
+            model = load_pretrained_edm(self.model_path, device=self.device)
+            return model
+        except Exception as e:
+            logger.warning(f"Failed to load model from {self.model_path}: {e}")
+            return None
+
+    def denoise(
+        self,
+        noisy: torch.Tensor,
+        scale: float,
+        background: float = 0.0,
+        read_noise: float = 0.0,
+        steps: int = 18,
+        guidance_weight: float = 1.0,
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Denoise using unified diffusion with specified guidance type.
+
+        Args:
+            noisy: Noisy image [B, C, H, W] (electrons)
+            scale: Normalization scale (electrons)
+            background: Background offset (electrons)
+            read_noise: Read noise standard deviation (electrons)
+            steps: Number of diffusion steps
+            guidance_weight: Guidance strength
+
+        Returns:
+            Denoised image [B, C, H, W] (normalized [0,1])
+        """
+        if not self.is_available or self.model is None:
+            raise RuntimeError(f"{self.name} model not available")
+
+        # Create appropriate guidance
+        from core.guidance_config import GuidanceConfig
+        from core.guidance_factory import create_guidance
+
+        guidance_config = GuidanceConfig(kappa=guidance_weight)
+        guidance = create_guidance(
+            guidance_type=self.guidance_type,
+            scale=scale,
+            background=background,
+            read_noise=read_noise,
+            config=guidance_config,
+        )
+
+        # Create sampler
+        from models.sampler import EDMPosteriorSampler
+
+        sampler = EDMPosteriorSampler(self.model, guidance, device=self.device)
+
+        # Convert to normalized space for model
+        noisy_norm = (noisy - background) / scale
+        noisy_norm = torch.clamp(noisy_norm, 0, 1)
+
+        # Create metadata (simplified)
+        from core.transforms import ImageMetadata
+
+        metadata = ImageMetadata(
+            original_height=noisy.shape[-2],
+            original_width=noisy.shape[-1],
+            scale_factor=1.0,
+            pixel_size=1.0,
+            pixel_unit="pixel",
+            domain="unknown",
+        )
+
+        # Sample
+        try:
+            result, info = sampler.sample(
+                y_observed=noisy,
+                metadata=metadata,
+                steps=steps,
+                guidance_weight=guidance_weight,
+            )
+            return torch.clamp(result, 0, 1)
+        except Exception as e:
+            logger.error(f"Sampling failed for {self.name}: {e}")
+            # Return a fallback result
+            return torch.clamp(noisy_norm, 0, 1)
+
+    def get_parameters(self) -> Dict[str, Any]:
+        """Get baseline parameters."""
+        return {
+            "guidance_type": self.guidance_type,
+            "model_type": "EDM",
+            "model_path": str(self.model_path),
+        }
+
+
 class BaselineComparator:
     """
     Comprehensive baseline comparison framework.
@@ -1046,6 +1167,20 @@ class BaselineComparator:
 
         # Self-supervised methods
         baselines["Noise2Void"] = Noise2VoidBaseline(device=self.device)
+
+        # Add unified diffusion baselines if models available
+        poisson_model_path = "checkpoints/poisson_guided_model.pth"
+        l2_model_path = "checkpoints/l2_guided_model.pth"
+
+        if Path(poisson_model_path).exists():
+            baselines["Poisson-Guided-Diffusion"] = UnifiedDiffusionBaseline(
+                poisson_model_path, "poisson", device=self.device
+            )
+
+        if Path(l2_model_path).exists():
+            baselines["L2-Guided-Diffusion"] = UnifiedDiffusionBaseline(
+                l2_model_path, "l2", device=self.device
+            )
 
         return baselines
 

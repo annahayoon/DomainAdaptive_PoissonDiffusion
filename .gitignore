@@ -137,6 +137,7 @@ runs/
 wandb/
 tensorboard_logs/
 evaluation_results/
+evaluation_results_*
 
 # Data directories (usually large and not tracked)
 data/raw/

@@ -1,0 +1,7 @@
+{
+  "error": "'dict' object has no attribute 'size'",
+  "training_time_hours": 0.010668438937928942,
+  "failed_epoch": 0,
+  "device": "cuda",
+  "guidance_type": "l2_baseline"
+}

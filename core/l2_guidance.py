@@ -1,16 +1,18 @@
+#!/usr/bin/env python3
 """
-L2 guidance for diffusion sampling - baseline comparison.
+L2 (MSE) likelihood guidance for diffusion sampling baseline.
 
-This module implements simple L2 (MSE) guidance as a baseline comparison
-to the physics-aware Poisson-Gaussian guidance. This provides a standard
-deep learning approach without domain-specific physics modeling.
+This module implements simple L2 guidance as a baseline to compare against
+our Poisson-Gaussian approach. It assumes uniform Gaussian noise and uses
+simple MSE-based likelihood gradients.
 
 Mathematical Foundation:
-- L2 Guidance: ∇ log p(y|x) = 2 * (y - x)
-- Simple MSE loss without noise model considerations
-- Uniform weighting across all pixels
+- Assumes: y ~ N(s·x + b, σ²) with uniform noise variance
+- Gradient: ∇ log p(y|x) = s·(y - s·x - b) / σ²
+- Scheduling: γ(σ) = κ·σ² (identical to Poisson-Gaussian for fair comparison)
 
-This serves as a baseline to demonstrate the benefits of physics-aware guidance.
+This provides a perfect ablation study that isolates the contribution of our
+physics-aware approach by sharing all infrastructure except guidance computation.
 """
 
 import logging
@@ -21,6 +23,7 @@ import torch
 
 from .error_handlers import safe_operation
 from .exceptions import GuidanceError, NumericalStabilityError
+from .guidance_config import GuidanceConfig
 from .interfaces import GuidanceComputer
 from .logging_config import get_logger
 
@@ -29,33 +32,36 @@ logger = get_logger(__name__)
 
 class L2Guidance(GuidanceComputer):
     """
-    Simple L2 (MSE) guidance for diffusion sampling.
+    L2 (MSE) likelihood guidance for diffusion sampling.
 
-    This class implements standard L2 guidance without physics-specific
-    noise modeling, serving as a baseline comparison to Poisson-Gaussian guidance.
+    This baseline assumes y ~ N(s·x + b, σ²) with uniform noise variance
+    and computes simple MSE gradients for comparison with Poisson-Gaussian.
     """
 
     def __init__(
         self,
-        scale: float = 1.0,
-        gradient_clip: float = 100.0,
-        normalize_gradients: bool = False,
+        scale: float,
+        background: float = 0.0,
+        noise_variance: float = 1.0,
+        config: Optional[GuidanceConfig] = None,
     ):
-        """
-        Initialize L2 guidance.
-
-        Args:
-            scale: Scaling factor for gradients (default: 1.0)
-            gradient_clip: Maximum absolute value for guidance gradients
-            normalize_gradients: Whether to normalize gradients
-        """
+        """Initialize L2 guidance with same interface as PoissonGuidance."""
         self.scale = scale
-        self.gradient_clip = gradient_clip
-        self.normalize_gradients = normalize_gradients
+        self.background = background
+        self.noise_variance = noise_variance
+        self.config = config or GuidanceConfig()
+
+        # Validate parameters
+        if scale <= 0:
+            raise GuidanceError(f"Scale must be positive, got {scale}")
+        if noise_variance <= 0:
+            raise GuidanceError(
+                f"Noise variance must be positive, got {noise_variance}"
+            )
 
         logger.info(
-            f"L2Guidance initialized: scale={scale}, "
-            f"gradient_clip={gradient_clip}, normalize_gradients={normalize_gradients}"
+            f"L2Guidance initialized: scale={scale:.1f} e⁻, "
+            f"noise_var={noise_variance:.1f} e⁻²"
         )
 
     @safe_operation("L2 score computation")
@@ -67,63 +73,78 @@ class L2Guidance(GuidanceComputer):
         **kwargs,
     ) -> torch.Tensor:
         """
-        Compute L2 guidance score.
+        Compute L2 likelihood score: ∇ log p(y|x) = s·(y - prediction) / σ².
 
         Args:
-            x_hat: Current estimate (normalized [0,1])
-            y_observed: Observed noisy data (electrons)
-            mask: Optional pixel mask
-            **kwargs: Additional arguments (ignored for L2)
+            x_hat: Current estimate [B, C, H, W] (normalized [0,1])
+            y_observed: Observed data [B, C, H, W] (electrons)
+            mask: Valid pixel mask [B, C, H, W] (optional)
 
         Returns:
-            L2 guidance gradient
+            Likelihood score [B, C, H, W]
         """
-        # For L2 guidance, we assume the observed data is also normalized [0,1]
-        # or we need to normalize it to match x_hat
+        # Convert prediction to electron space
+        prediction_electrons = self.scale * x_hat + self.background
 
-        # If y_observed is in electrons, normalize it by scale
-        if y_observed.max() > 2.0:  # Heuristic to detect if data is in electrons
-            y_normalized = torch.clamp(y_observed / self.scale, 0.0, 1.0)
-        else:
-            y_normalized = torch.clamp(y_observed, 0.0, 1.0)
+        # Compute residual
+        residual = y_observed - prediction_electrons
 
-        # Ensure x_hat is in valid range
-        x_hat = torch.clamp(x_hat, 0.0, 1.0)
-
-        # Compute L2 gradient: ∇ MSE = 2 * (x_hat - y_normalized)
-        # We want to minimize MSE, so gradient points toward target
-        gradient = 2.0 * (y_normalized - x_hat)
+        # L2 gradient: scale * residual / noise_variance
+        score = (self.scale / self.noise_variance) * residual
 
         # Apply mask if provided
         if mask is not None:
-            gradient = gradient * mask
+            score = score * mask
 
-        # Apply gradient clipping for numerical stability
-        if self.gradient_clip > 0:
-            gradient = torch.clamp(gradient, -self.gradient_clip, self.gradient_clip)
-
-        # Optional gradient normalization
-        if self.normalize_gradients:
-            # Compute norm over spatial dimensions for each batch element
-            grad_norm = torch.norm(
-                gradient.view(gradient.shape[0], -1), dim=1, keepdim=True
+        # Clamp for numerical stability (same as Poisson guidance)
+        if self.config.gradient_clip > 0:
+            score = torch.clamp(
+                score, -self.config.gradient_clip, self.config.gradient_clip
             )
-            grad_norm = grad_norm.view(-1, 1, 1, 1)  # Reshape for broadcasting
-            gradient = gradient / torch.clamp(grad_norm, min=1e-8)
 
-        return gradient
+        return score
 
     def gamma_schedule(self, sigma: torch.Tensor) -> torch.Tensor:
-        """
-        Simple constant gamma schedule for L2 guidance.
+        """Use identical scheduling to Poisson-Gaussian for fair comparison."""
+        if self.config.gamma_schedule == "sigma2":
+            gamma = self.config.kappa * sigma.square()
+        elif self.config.gamma_schedule == "linear":
+            gamma = self.config.kappa * sigma
+        elif self.config.gamma_schedule == "const":
+            gamma = torch.full_like(sigma, self.config.kappa)
+        else:
+            raise GuidanceError(f"Unknown gamma schedule: {self.config.gamma_schedule}")
 
-        Args:
-            sigma: Noise level (ignored for L2)
+        return gamma
 
-        Returns:
-            Constant gamma value
-        """
-        return torch.ones_like(sigma)
+    @safe_operation("L2 guidance computation")
+    def compute(
+        self,
+        x_hat: torch.Tensor,
+        y_observed: torch.Tensor,
+        sigma_t: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Compute scaled guidance gradient (shared implementation)."""
+        # Compute base score
+        score = self.compute_score(x_hat, y_observed, mask, **kwargs)
+
+        # Compute guidance weight
+        gamma = self.gamma_schedule(sigma_t)
+
+        # Ensure gamma has correct shape for broadcasting
+        if gamma.dim() == 1:  # [B] -> [B, 1, 1, 1]
+            gamma = gamma.view(-1, 1, 1, 1)
+        elif gamma.dim() == 0:  # scalar -> scalar
+            pass
+        else:
+            raise GuidanceError(f"Unexpected gamma shape: {gamma.shape}")
+
+        # Scale score by guidance weight
+        guidance = score * gamma
+
+        return guidance
 
     def compute_likelihood(
         self,
@@ -187,7 +208,7 @@ class L2Guidance(GuidanceComputer):
 
         return True, ""
 
-    def get_diagnostics(self) -> Dict[str, Any]:
+    def get_diagnostics(self) -> Dict[str, float]:
         """
         Get diagnostic information for L2 guidance.
 
@@ -197,6 +218,8 @@ class L2Guidance(GuidanceComputer):
         return {
             "guidance_type": "L2",
             "scale": self.scale,
-            "gradient_clip": self.gradient_clip,
-            "normalize_gradients": self.normalize_gradients,
+            "background": self.background,
+            "noise_variance": self.noise_variance,
+            "kappa": self.config.kappa,
+            "gradient_clip": self.config.gradient_clip,
         }

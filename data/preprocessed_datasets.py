@@ -78,7 +78,7 @@ class PreprocessedDataset(Dataset):
         if self.max_files is not None and self.max_files > 0:
             import random
 
-            rng = random.Random(self.seed)
+            rng = random.Random(self.seed)  # nosec B311
             if len(files) > self.max_files:
                 files = rng.sample(files, self.max_files)
                 files.sort()  # Keep sorted for reproducibility
