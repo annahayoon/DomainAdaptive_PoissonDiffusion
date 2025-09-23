@@ -245,6 +245,7 @@ class DomainEncoder(nn.Module):
         read_noise: Union[float, torch.Tensor],
         background: Union[float, torch.Tensor],
         device: Optional[torch.device] = None,
+        conditioning_type: str = "dapgd",
     ) -> torch.Tensor:
         """
         Encode domain parameters into conditioning vector.
@@ -255,6 +256,7 @@ class DomainEncoder(nn.Module):
             read_noise: Read noise standard deviation (electrons)
             background: Background offset (electrons)
             device: Target device for tensors
+            conditioning_type: Type of conditioning ('dapgd' or 'l2')
 
         Returns:
             Conditioning vector [B, 6]
@@ -311,24 +313,48 @@ class DomainEncoder(nn.Module):
         domain_onehot = torch.zeros(batch_size, 3, device=device or scale.device)
         domain_onehot.scatter_(1, domain_tensor.unsqueeze(1), 1.0)
 
-        # Normalize log scale
-        log_scale = torch.log10(torch.clamp(scale, min=1e-6))
-        log_scale_norm = (log_scale - self.log_scale_mean) / self.log_scale_std
+        if conditioning_type == "dapgd":
+            # DAPGD: [domain_onehot(3), log_scale(1), rel_noise(1), rel_bg(1)]
+            # Normalize log scale
+            log_scale = torch.log10(torch.clamp(scale, min=1e-6))
+            log_scale_norm = (log_scale - self.log_scale_mean) / self.log_scale_std
 
-        # Compute relative parameters
-        rel_read_noise = read_noise / torch.clamp(scale, min=1e-6)
-        rel_background = background / torch.clamp(scale, min=1e-6)
+            # Compute relative parameters
+            rel_read_noise = read_noise / torch.clamp(scale, min=1e-6)
+            rel_background = background / torch.clamp(scale, min=1e-6)
 
-        # Concatenate conditioning vector
-        condition = torch.cat(
-            [
-                domain_onehot,  # [B, 3]
-                log_scale_norm.unsqueeze(1),  # [B, 1]
-                rel_read_noise.unsqueeze(1),  # [B, 1]
-                rel_background.unsqueeze(1),  # [B, 1]
-            ],
-            dim=1,
-        )  # [B, 6]
+            # Concatenate conditioning vector
+            condition = torch.cat(
+                [
+                    domain_onehot,  # [B, 3]
+                    log_scale_norm.unsqueeze(1),  # [B, 1]
+                    rel_read_noise.unsqueeze(1),  # [B, 1]
+                    rel_background.unsqueeze(1),  # [B, 1]
+                ],
+                dim=1,
+            )
+        elif conditioning_type == "l2":
+            # L2: [domain_onehot(3), noise_estimate(1), padding(2)]
+            # Estimate noise standard deviation in normalized [0,1] space
+            # Var_norm = (signal_e + read_noise^2) / scale^2
+            # We approximate signal_e with a typical value, e.g., scale / 2
+            mean_signal_e = scale / 2
+            noise_var_e = mean_signal_e + read_noise**2
+            noise_std_norm = torch.sqrt(noise_var_e) / scale
+            noise_std_norm = torch.log10(torch.clamp(noise_std_norm, min=1e-6))
+
+            padding = torch.zeros(batch_size, 2, device=device or scale.device)
+
+            condition = torch.cat(
+                [
+                    domain_onehot,
+                    noise_std_norm.unsqueeze(1),
+                    padding,
+                ],
+                dim=1,
+            )
+        else:
+            raise ValueError(f"Unknown conditioning type: {conditioning_type}")
 
         # Ensure condition has the same dtype as input parameters
         # This ensures compatibility with mixed precision training
@@ -757,6 +783,7 @@ class EDMModelWrapper(nn.Module):
         read_noise: Union[float, torch.Tensor],
         background: Union[float, torch.Tensor],
         device: Optional[torch.device] = None,
+        conditioning_type: str = "dapgd",
     ) -> torch.Tensor:
         """
         Encode domain parameters into conditioning vector.
@@ -767,6 +794,7 @@ class EDMModelWrapper(nn.Module):
             read_noise: Read noise parameter(s)
             background: Background parameter(s)
             device: Target device
+            conditioning_type: Type of conditioning ('dapgd' or 'l2')
 
         Returns:
             Conditioning vector [B, 6]
@@ -777,6 +805,7 @@ class EDMModelWrapper(nn.Module):
             read_noise=read_noise,
             background=background,
             device=device,
+            conditioning_type=conditioning_type,
         )
 
     def get_model_info(self) -> Dict[str, Any]:
