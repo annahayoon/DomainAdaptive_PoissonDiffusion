@@ -694,6 +694,7 @@ class AstronomyTrainingManager:
         warmup_epochs: int = 15,  # Extended warmup for stability
         val_frequency: int = 2,  # More frequent validation
         gradient_clip_norm: float = 0.1,  # Very conservative clipping
+        ema_decay: float = 0.999,  # EMA decay for better inference
         **config_kwargs,
     ) -> MultiDomainTrainingConfig:
         """
@@ -743,6 +744,8 @@ class AstronomyTrainingManager:
             beta1=0.9,
             beta2=0.999,
             eps=1e-8,
+            # EMA for better inference performance
+            ema_decay=ema_decay,
             # Scheduler
             scheduler=lr_scheduler,
             min_lr=1e-7,  # Extremely low minimum learning rate
@@ -1188,6 +1191,12 @@ def main():
         default=0.1,
         help="Gradient clipping norm threshold (very conservative)",
     )
+    parser.add_argument(
+        "--ema_decay",
+        type=float,
+        default=0.999,
+        help="EMA decay rate for better inference performance",
+    )
 
     # Advanced checkpointing arguments
     parser.add_argument(
@@ -1437,6 +1446,7 @@ def main():
         warmup_epochs=warmup_epochs,
         val_frequency=args.val_frequency,
         gradient_clip_norm=args.gradient_clip_norm,
+        ema_decay=args.ema_decay,
     )
 
     # Save configuration (only on main process)

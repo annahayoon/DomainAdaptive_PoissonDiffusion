@@ -25,6 +25,9 @@ from scipy.signal import periodogram
 from skimage.metrics import peak_signal_noise_ratio as psnr_skimage
 from skimage.metrics import structural_similarity as ssim_skimage
 
+from .exceptions import AnalysisError
+from .residual_analysis import ResidualAnalyzer
+
 # Set up logging
 logger = logging.getLogger(__name__)
 
@@ -58,7 +61,8 @@ class EvaluationReport:
 
     # Physics metrics
     chi2_consistency: MetricResult
-    residual_whiteness: MetricResult
+    residual_distribution: MetricResult  # N(0,1) test
+    residual_whiteness: MetricResult  # Spectral flatness
     bias_analysis: MetricResult
 
     # Domain-specific metrics
@@ -83,6 +87,7 @@ class EvaluationReport:
             "lpips",
             "ms_ssim",
             "chi2_consistency",
+            "residual_distribution",
             "residual_whiteness",
             "bias_analysis",
         ]:
@@ -949,6 +954,7 @@ class EvaluationSuite:
         self.standard_metrics = StandardMetrics(device)
         self.physics_metrics = PhysicsMetrics()
         self.domain_metrics = DomainSpecificMetrics()
+        self.residual_analyzer = ResidualAnalyzer(device)
 
         logger.info(f"EvaluationSuite initialized on device: {device}")
 
@@ -991,24 +997,71 @@ class EvaluationSuite:
 
         logger.info(f"Evaluating {method_name} on {dataset_name} ({domain})")
 
-        # Standard metrics
-        logger.debug("Computing standard metrics...")
-        psnr = self.standard_metrics.compute_psnr(pred, target, mask=mask)
-        ssim = self.standard_metrics.compute_ssim(pred, target, mask=mask)
-        lpips = self.standard_metrics.compute_lpips(pred, target, mask=mask)
-        ms_ssim = self.standard_metrics.compute_ms_ssim(pred, target, mask=mask)
+        # --- Space Conversion for Metrics ---
+        # De-normalize predictions and targets to electron space for consistent metrics.
+        # This ensures PSNR/SSIM are calculated in the physical domain.
+        pred_electrons = pred * scale + background
+        target_electrons = target * scale + background
+        data_range_electrons = scale  # The dynamic range is the scale factor
 
-        # Physics metrics
+        # Standard metrics (calculated in electron space)
+        logger.debug("Computing standard metrics in electron space...")
+        psnr = self.standard_metrics.compute_psnr(
+            pred_electrons, target_electrons, data_range=data_range_electrons, mask=mask
+        )
+        ssim = self.standard_metrics.compute_ssim(
+            pred_electrons, target_electrons, data_range=data_range_electrons, mask=mask
+        )
+
+        # Perceptual metrics (calculated in normalized space as they expect [0,1] or [-1,1])
+        lpips = self.standard_metrics.compute_lpips(pred, target, mask=mask)
+        ms_ssim = self.standard_metrics.compute_ms_ssim(pred, target, data_range=1.0, mask=mask)
+
+        # Physics metrics (operates on mixed spaces, handles conversion internally)
         logger.debug("Computing physics metrics...")
         chi2 = self.physics_metrics.compute_chi2_consistency(
             pred, noisy, scale, background, read_noise, mask
         )
-        whiteness = self.physics_metrics.compute_residual_whiteness(
-            pred, noisy, scale, background, mask
-        )
-        bias = self.physics_metrics.compute_bias_analysis(
-            pred, noisy, scale, background, mask
-        )
+
+        # --- Residual Analysis ---
+        # The new ResidualAnalyzer provides a much more robust analysis
+        # of the physical correctness of the restoration.
+        try:
+            residual_stats = self.residual_analyzer.analyze_residuals(
+                pred_electrons, noisy, read_noise, mask
+            )
+            dist_meta = {
+                "mean": residual_stats["mean"],
+                "std_dev": residual_stats["std_dev"],
+                "ks_statistic": residual_stats["ks_statistic"],
+                "ks_pvalue": residual_stats["ks_pvalue"],
+            }
+            # The primary value for the distribution metric is the KS statistic,
+            # which measures deviation from a perfect N(0,1). Lower is better.
+            residual_dist = MetricResult(value=dist_meta["ks_statistic"], metadata=dist_meta)
+
+            whiteness_meta = {
+                "spectral_flatness": residual_stats["whiteness_spectral_flatness"],
+                "autocorr_x": residual_stats["autocorrelation_lag1_x"],
+                "autocorr_y": residual_stats["autocorrelation_lag1_y"],
+            }
+            # Primary value is spectral flatness. Closer to 1 is better.
+            residual_whiteness = MetricResult(
+                value=whiteness_meta["spectral_flatness"], metadata=whiteness_meta
+            )
+
+            # Bias is the mean of the normalized residuals. Closer to 0 is better.
+            bias = MetricResult(
+                value=abs(residual_stats["mean"]),
+                metadata={"mean_residual": residual_stats["mean"]},
+            )
+
+        except AnalysisError as e:
+            logger.warning(f"Residual analysis failed: {e}")
+            nan_result = MetricResult(value=float("nan"), metadata={"error": str(e)})
+            residual_dist = nan_result
+            residual_whiteness = nan_result
+            bias = nan_result
 
         # Domain-specific metrics
         logger.debug("Computing domain-specific metrics...")
@@ -1065,7 +1118,8 @@ class EvaluationSuite:
             lpips=lpips,
             ms_ssim=ms_ssim,
             chi2_consistency=chi2,
-            residual_whiteness=whiteness,
+            residual_distribution=residual_dist,
+            residual_whiteness=residual_whiteness,
             bias_analysis=bias,
             domain_metrics=domain_metrics_dict,
             num_images=pred.shape[0],
@@ -1074,7 +1128,8 @@ class EvaluationSuite:
 
         logger.info(f"Evaluation completed in {processing_time:.2f}s")
         logger.info(
-            f"PSNR: {psnr.value:.2f} dB, SSIM: {ssim.value:.3f}, χ²: {chi2.value:.3f}"
+            f"PSNR: {psnr.value:.2f} dB, SSIM: {ssim.value:.3f}, χ²: {chi2.value:.3f}, "
+            f"Res-KS: {residual_dist.value:.3f}"
         )
 
         return report
@@ -1123,6 +1178,9 @@ class EvaluationSuite:
                 "lpips": [r.lpips.value for r in group_reports],
                 "ms_ssim": [r.ms_ssim.value for r in group_reports],
                 "chi2_consistency": [r.chi2_consistency.value for r in group_reports],
+                "residual_distribution": [
+                    r.residual_distribution.value for r in group_reports
+                ],
                 "residual_whiteness": [
                     r.residual_whiteness.value for r in group_reports
                 ],
@@ -1154,6 +1212,7 @@ class EvaluationSuite:
                     "chi2_consistency",
                     "bias_analysis",
                     "photometry_error",
+                    "residual_distribution",  # Lower KS-stat is better
                 ]:
                     # Lower is better
                     best_idx = min(valid_values, key=lambda x: x[1])[0]
@@ -1223,6 +1282,11 @@ class EvaluationSuite:
                 for r in group_reports
                 if not np.isnan(r.chi2_consistency.value)
             ]
+            residual_ks_values = [
+                r.residual_distribution.value
+                for r in group_reports
+                if not np.isnan(r.residual_distribution.value)
+            ]
 
             summary[key] = {
                 "method": method_name,
@@ -1245,6 +1309,12 @@ class EvaluationSuite:
                     "std": np.std(chi2_values) if chi2_values else float("nan"),
                     "min": np.min(chi2_values) if chi2_values else float("nan"),
                     "max": np.max(chi2_values) if chi2_values else float("nan"),
+                },
+                "residual_ks_stats": {
+                    "mean": np.mean(residual_ks_values) if residual_ks_values else float("nan"),
+                    "std": np.std(residual_ks_values) if residual_ks_values else float("nan"),
+                    "min": np.min(residual_ks_values) if residual_ks_values else float("nan"),
+                    "max": np.max(residual_ks_values) if residual_ks_values else float("nan"),
                 },
                 "avg_processing_time": np.mean(
                     [r.processing_time for r in group_reports]

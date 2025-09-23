@@ -668,6 +668,7 @@ class PhotographyTrainingManager:
         val_frequency_steps: Optional[int] = None,
         gradient_clip_norm: float = 1.0,
         prefetch_factor: int = 2,
+        ema_decay: float = 0.999,  # EMA decay for better inference
         **config_kwargs,
     ) -> MultiDomainTrainingConfig:
         """
@@ -718,6 +719,8 @@ class PhotographyTrainingManager:
             beta1=0.9,
             beta2=0.999,
             eps=1e-8,
+            # EMA for better inference performance
+            ema_decay=ema_decay,
             # Scheduler
             scheduler=lr_scheduler,
             min_lr=1e-6,
@@ -1120,6 +1123,12 @@ def main():
         type=float,
         default=1.0,
         help="Gradient clipping norm threshold",
+    )
+    parser.add_argument(
+        "--ema_decay",
+        type=float,
+        default=0.999,
+        help="EMA decay rate for better inference performance",
     )
 
     # Advanced checkpointing arguments
@@ -1620,6 +1629,7 @@ def main():
         val_frequency_steps=args.val_frequency_steps,
         gradient_clip_norm=args.gradient_clip_norm,
         prefetch_factor=args.prefetch_factor,
+        ema_decay=args.ema_decay,
     )
 
     # Save configuration (only on main process)

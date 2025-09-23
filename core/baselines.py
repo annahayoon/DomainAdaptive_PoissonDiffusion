@@ -1095,11 +1095,15 @@ class UnifiedDiffusionBaseline(BaselineMethod):
 
         # Sample
         try:
+            # Determine conditioning type based on guidance
+            conditioning_type = "l2" if self.guidance_type == "l2" else "dapgd"
+
             result, info = sampler.sample(
                 y_observed=noisy,
                 metadata=metadata,
                 steps=steps,
                 guidance_weight=guidance_weight,
+                conditioning_type=conditioning_type,
             )
             return torch.clamp(result, 0, 1)
         except Exception as e:
