@@ -7,10 +7,10 @@
 echo "🔬 L2 BASELINE MICROSCOPY TRAINING CONFIGURATION v1.0"
 echo "===================================================="
 echo ""
-echo "Strategy: Identical to Poisson-Gaussian training except guidance type"
-echo "✅ BASELINE: L2 (MSE) guidance instead of Poisson-Gaussian"
-echo "✅ TRAINING: 100K max steps for fair comparison"
-echo "✅ CONFIG: All other hyperparameters identical to main method"
+echo "Strategy: CORRECTED L2 baseline with proper ablation methodology"
+echo "✅ BASELINE: Homoscedastic Gaussian noise + v-parameterization training"
+echo "✅ TRAINING: Same v-param objective, differs only in inference guidance"  
+echo "✅ CONFIG: Log-uniform noise [0.01,2.0] + simple conditioning"
 echo ""
 
 # Kill existing sessions
@@ -47,8 +47,9 @@ tmux send-keys -t l2_microscopy_training "
 cd /home/jilab/Jae && \\
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \\
 OMP_NUM_THREADS=8 \\
-python train_l2_microscopy_model.py \\
-    --data_root \"$DATA_ROOT\" \\
+python train_l2_unified.py \\
+    --data_root \"/opt/dlami/nvme/preprocessed/prior_clean\" \\
+    --domains microscopy \\
     --max_steps 100000 \\
     --batch_size 4 \\
     --gradient_accumulation_steps 4 \\
@@ -111,18 +112,15 @@ for key, value in configs.items():
 print()
 
 # L2 baseline-specific optimizations
-print(\"🔬 L2 BASELINE OPTIMIZATIONS:\")
-print(\"  1. GUIDANCE: L2 (MSE) loss instead of Poisson-Gaussian\")
-print(\"  2. MIXED PRECISION: DISABLED in Phase 1 (same fix as Poisson)\")
-print(\"  3. DATA LOADING: Conservative workers (identical setup)\")
-print(\"  4. DATASET: Same single-channel grayscale microscopy data\")
-print(\"  5. MEMORY: Conservative settings (identical to Poisson)\")
-print(\"  6. PHASED APPROACH: FP32 → FP16 (same as Poisson)\")
-print(\"  7. STABILITY: Ultra-conservative hyperparameters (identical)\")
-print(\"  8. VALIDATION: Every 5K steps (identical monitoring)\")
-print(\"  9. GRADIENT CLIPPING: 0.1 (identical to Poisson)\")
-print(\" 10. LEARNING RATE: 5e-5 → 2.5e-5 (identical phasing)\")
-print(\" 11. MAX STEPS: 100K (reduced for baseline comparison)\")
+print(\"🔬 L2 BASELINE METHODOLOGY (CORRECTED):\")
+print(\"  1. TRAINING: Homoscedastic Gaussian noise (x + N(0,σ²))\")
+print(\"  2. NOISE RANGE: Log-uniform [0.01, 2.0] (matches EDM)\")
+print(\"  3. CONDITIONING: Simple 4D + 2D padding (not physics-aware)\")
+print(\"  4. OBJECTIVE: v-parameterization (identical to Poisson-Gaussian)\")
+print(\"  5. GUIDANCE: Only differs during inference (L2 vs Poisson)\")
+print(\"  6. ARCHITECTURE: Identical EDM model\")
+print(\"  7. VALIDATION: Same v-param loss computation\")
+print(\"  8. PURPOSE: Fair ablation study\")
 print(\"=\" * 70)
 print()
 
@@ -254,19 +252,14 @@ while True:
 echo ""
 echo "✅ L2 baseline microscopy training created!"
 echo ""
-echo "📊 L2 BASELINE TRAINING STRATEGY:"
+echo "📊 CORRECTED L2 BASELINE STRATEGY:"
 echo ""
-echo "Phase 1 (Stability First - FP32 Only):"
-echo "  • Guidance: L2 (MSE) instead of Poisson-Gaussian"
-echo "  • Mixed Precision: OFF (same fix as Poisson)"
-echo "  • Learning Rate: 5e-5 (identical to Poisson)"
-echo "  • Duration: Step-based training (until stable checkpoint)"
-echo ""
-echo "Phase 2 (Speed Optimization) - After stable checkpoint:"
-echo "  • Guidance: L2 (MSE) instead of Poisson-Gaussian"
-echo "  • Mixed Precision: ON (same as Poisson)"
-echo "  • Learning Rate: 2.5e-5 (identical to Poisson)"
-echo "  • Duration: Step-based training"
+echo "Training Approach (Proper Ablation):"
+echo "  • NOISE: Homoscedastic Gaussian [0.01, 2.0] log-uniform"
+echo "  • CONDITIONING: 4D simple + 2D padding (not physics-aware)"
+echo "  • TRAINING: v-parameterization (identical to Poisson-Gaussian)"
+echo "  • GUIDANCE: Only differs during inference"
+echo "  • STEPS: 100K for efficient comparison"
 echo ""
 echo "🔧 IDENTICAL CONFIGURATION (except guidance):"
 echo "  ✅ Same model architecture (256ch, 6 blocks)"

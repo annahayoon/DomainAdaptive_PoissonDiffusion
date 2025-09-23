@@ -413,7 +413,7 @@ class PriorCleanTrainingManager:
         model.train()
         return avg_val_loss
 
-    def save_checkpoint(self, model: nn.Module, optimizer: torch.optim.Optimizer, step: int, config: Dict[str, Any], loss: float = None, val_loss: float = None, is_best: bool = False):
+    def save_checkpoint(self, model: nn.Module, optimizer: torch.optim.Optimizer, step: int, config: Dict[str, Any], loss: float = None, val_loss: float = None, is_best: bool = False, ema_model: nn.Module = None):
         """Save a checkpoint with comprehensive metadata."""
         checkpoint_info = {
             'model_state_dict': model.state_dict(),
@@ -421,6 +421,10 @@ class PriorCleanTrainingManager:
             'step': step,
             'config': config,
         }
+        
+        # Add EMA model to checkpoint
+        if ema_model is not None:
+            checkpoint_info['ema_model_state_dict'] = ema_model.state_dict()
 
         if loss is not None:
             checkpoint_info['train_loss'] = loss
@@ -514,6 +518,9 @@ class PriorCleanTrainingManager:
                 "num_workers": config_kwargs.get("num_workers", 8),
                 "pin_memory": True,
                 "persistent_workers": True,
+                
+                # EMA for better inference
+                "ema_decay": config_kwargs.get("ema_decay", 0.999),
             }
             
             logger.info("🔥 H100 Configuration:")
@@ -544,6 +551,7 @@ class PriorCleanTrainingManager:
                 "num_workers": config_kwargs.get("num_workers", 4),
                 "pin_memory": True,
                 "persistent_workers": False,
+                "ema_decay": config_kwargs.get("ema_decay", 0.999),
             }
         
         # Override with any provided kwargs
@@ -695,6 +703,16 @@ def main():
         weight_decay=1e-3
     )
 
+    # EMA model for better inference performance
+    ema_model = None
+    ema_decay = config.get("ema_decay", 0.999)
+    if ema_decay > 0:
+        import copy
+        ema_model = copy.deepcopy(model).eval()
+        for param in ema_model.parameters():
+            param.requires_grad = False
+        logger.info(f"✅ EMA model created with decay: {ema_decay}")
+
     # Mixed precision scaler
     scaler = torch.cuda.amp.GradScaler() if config["mixed_precision"] else None
 
@@ -748,6 +766,12 @@ def main():
                     loss.backward()
                     optimizer.step()
 
+                # Update EMA model
+                if ema_model is not None:
+                    with torch.no_grad():
+                        for ema_param, param in zip(ema_model.parameters(), model.parameters()):
+                            ema_param.data.mul_(ema_decay).add_(param.data, alpha=1 - ema_decay)
+
                 # Logging
                 if step % 100 == 0:
                     logger.info(f"Step {step:,}: Loss = {loss.item():.6f}")
@@ -761,14 +785,14 @@ def main():
                     # Track best model
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
-                        training_manager.save_checkpoint(model, optimizer, step, config, val_loss=val_loss, is_best=True)
+                        training_manager.save_checkpoint(model, optimizer, step, config, val_loss=val_loss, is_best=True, ema_model=ema_model)
                         logger.info(f"   🏆 New best model! Previous: {best_val_loss:.6f} → Current: {val_loss:.6f}")
                     else:
                         logger.info(f"   No improvement (best: {best_val_loss:.6f})")
 
                 # Regular checkpointing every N steps
                 if step % config["save_frequency_steps"] == 0 and step > 0:
-                    training_manager.save_checkpoint(model, optimizer, step, config, loss.item())
+                    training_manager.save_checkpoint(model, optimizer, step, config, loss.item(), ema_model=ema_model)
 
                 # Phase-based checkpointing for unified training
                 if step % config.get("phase_save_frequency", 50000) == 0 and step > 0:
@@ -780,11 +804,17 @@ def main():
         
         # Save final model
         final_path = training_manager.output_dir / "final_model.pth"
-        torch.save({
+        final_checkpoint = {
             'model_state_dict': model.state_dict(),
             'step': step,
             'config': config,
-        }, final_path)
+        }
+        
+        # Add EMA model to final checkpoint
+        if ema_model is not None:
+            final_checkpoint['ema_model_state_dict'] = ema_model.state_dict()
+            
+        torch.save(final_checkpoint, final_path)
         
         logger.info(f"Final model saved: {final_path}")
         
@@ -793,12 +823,18 @@ def main():
         
         # Save interrupted checkpoint
         interrupt_path = training_manager.output_dir / "interrupted_checkpoint.pth"
-        torch.save({
+        interrupt_checkpoint = {
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'step': step,
             'config': config,
-        }, interrupt_path)
+        }
+        
+        # Add EMA model to interrupted checkpoint
+        if ema_model is not None:
+            interrupt_checkpoint['ema_model_state_dict'] = ema_model.state_dict()
+            
+        torch.save(interrupt_checkpoint, interrupt_path)
         
         logger.info(f"Interrupted checkpoint saved: {interrupt_path}")
 
