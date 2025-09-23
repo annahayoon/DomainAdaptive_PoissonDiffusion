@@ -42,7 +42,7 @@ from .augmentations import (
 from .loaders import (
     AstronomyLoader,
     FormatDetector,
-    ImageMetadata,
+    ImageMetadata as LoaderImageMetadata,
     MicroscopyLoader,
     PhotographyLoader,
 )

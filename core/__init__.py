@@ -34,15 +34,20 @@ from .interfaces import (
     Sampler,
     Transform,
 )
-from .logging_config import get_logger, setup_project_logging, temporary_log_level
+from .logging_config import (
+    LoggingManager,
+    get_logger,
+    setup_project_logging,
+    temporary_log_level,
+)
 
 # Import implementations when they exist
 from .transforms import ImageMetadata, ReversibleTransform
 
-# from .guidance import (
-#     PoissonGuidance,
-#     GuidanceConfig,
-# )
+from .guidance_config import GuidanceConfig, GuidancePresets
+from .guidance_factory import create_guidance, create_guidance_from_config
+from .l2_guidance import L2Guidance
+from .poisson_guidance import PoissonGuidance, create_poisson_guidance, create_domain_guidance
 
 
 __version__ = "0.1.0"
@@ -66,6 +71,7 @@ __all__ = [
     "error_context",
     "DiagnosticCollector",
     # Logging
+    "LoggingManager",
     "setup_project_logging",
     "get_logger",
     "temporary_log_level",
@@ -76,8 +82,13 @@ __all__ = [
     "CalibrationParams",
     "load_calibration",
     "create_calibration_from_params",
-    # "PoissonGuidance",
-    # "GuidanceConfig",
-    # "SensorCalibration",
-    # "CalibrationParams",
+    # Guidance classes
+    "PoissonGuidance",
+    "L2Guidance",
+    "GuidanceConfig",
+    "GuidancePresets",
+    "create_guidance",
+    "create_guidance_from_config",
+    "create_poisson_guidance",
+    "create_domain_guidance",
 ]

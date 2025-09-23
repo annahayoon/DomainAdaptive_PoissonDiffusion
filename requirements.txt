@@ -11,6 +11,7 @@ Pillow>=9.0.0
 rawpy>=0.18.0
 opencv-python>=4.8.0  # For advanced image processing
 scikit-image>=0.21.0  # For image metrics and analysis
+scikit-learn>=1.0.0  # For preprocessing and machine learning utilities
 
 # Astronomy/Scientific Data
 astropy>=5.0.0
