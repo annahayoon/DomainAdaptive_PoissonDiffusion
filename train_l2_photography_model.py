@@ -1,22 +1,14 @@
 #!/usr/bin/env python3
 """
-Comprehensive training script for Poisson-Gaussian diffusion restoration with astronomy data.
+L2 Baseline training script for photography data.
 
-This script provides:
-- Real astronomy data loading and preprocessing (FITS format)
-- Multi-domain training setup optimized for extreme low-light astronomy
-- Comprehensive monitoring and logging
-- GPU optimization and memory management
-- Early stopping and checkpointing
-- Physics-aware loss functions and metrics for astronomy
+This script is IDENTICAL to train_photography_model.py except:
+- Uses L2 (MSE) guidance instead of Poisson-Gaussian
+- Configured for 100K max steps for baseline comparison
+- All other hyperparameters identical for fair ablation study
 
 Usage:
-    python train_astronomy_model.py --data_root /path/to/astronomy/data
-
-Requirements:
-- Astronomy data in FITS format (.fits, .fit)
-- Calibration files for each domain
-- Sufficient GPU memory (16GB+ recommended)
+    python train_l2_photography_model.py --data_root /path/to/photography/data
 """
 
 import argparse
@@ -125,34 +117,11 @@ except Exception as e:
     print("   Continuing with default settings...")
 
 from core.error_handlers import ErrorHandler
+
+# Import L2 guidance factory for baseline training
+from core.guidance_factory import create_guidance
 from core.logging_config import LoggingManager
 from data.domain_datasets import MultiDomainDataset
-
-# Optional astronomy preprocessor import (may not exist on all systems)
-HAS_ASTRONOMY_PREPROCESSOR = False
-AstronomyDataPreprocessor = None
-create_astronomy_collate_fn = None
-
-try:
-    from data.astronomy_preprocessor import (
-        AstronomyDataPreprocessor,
-        create_astronomy_collate_fn,
-    )
-
-    HAS_ASTRONOMY_PREPROCESSOR = True
-    print("✅ Astronomy preprocessor available")
-except ImportError as e:
-    print(f"⚠️  Astronomy preprocessor not available: {e}")
-    print("   Continuing without astronomy-specific preprocessing...")
-    HAS_ASTRONOMY_PREPROCESSOR = False
-    AstronomyDataPreprocessor = None
-    create_astronomy_collate_fn = None
-except Exception as e:
-    print(f"⚠️  Error importing astronomy preprocessor: {e}")
-    print("   Continuing without astronomy-specific preprocessing...")
-    HAS_ASTRONOMY_PREPROCESSOR = False
-    AstronomyDataPreprocessor = None
-    create_astronomy_collate_fn = None
 from models.edm_wrapper import (
     ProgressiveEDM,
     create_edm_wrapper,
@@ -225,8 +194,8 @@ class SyntheticDataset:
         self.val_dataset = SyntheticSubset(self.val_files, target_size)
 
         # Add domain_datasets attribute for MultiDomainTrainer compatibility
-        self.train_dataset.domain_datasets = {"astronomy": self.train_dataset}
-        self.val_dataset.domain_datasets = {"astronomy": self.val_dataset}
+        self.train_dataset.domain_datasets = {"photography": self.train_dataset}
+        self.val_dataset.domain_datasets = {"photography": self.val_dataset}
 
     def __len__(self):
         return len(self.image_files)
@@ -234,13 +203,13 @@ class SyntheticDataset:
     def __getitem__(self, idx):
         # This shouldn't be called directly, but provide fallback
         return {
-            "clean": torch.randn(1, self.target_size, self.target_size),
-            "noisy": torch.randn(1, self.target_size, self.target_size),
-            "electrons": torch.randn(1, self.target_size, self.target_size),
-            "domain": torch.tensor([2]),  # Astronomy domain
+            "clean": torch.randn(4, self.target_size, self.target_size),
+            "noisy": torch.randn(4, self.target_size, self.target_size),
+            "electrons": torch.randn(4, self.target_size, self.target_size),
+            "domain": torch.tensor([0]),
             "metadata": {"synthetic": True, "idx": idx},
             "domain_params": {
-                "scale": 50000.0,  # Astronomy scale for extreme low-light
+                "scale": 1000.0,
                 "read_noise": 3.0,
                 "background": 100.0,
                 "gain": 1.0,
@@ -270,42 +239,36 @@ class SyntheticSubset:
             )  # Add channel dim
             noisy = torch.from_numpy(data["noisy"]).float().unsqueeze(0)
 
-            # Astronomy typically uses single channel
-            clean_1ch = clean
-            noisy_1ch = noisy
+            # Convert to 4-channel format to match real data
+            clean_4ch = clean.repeat(4, 1, 1)  # Repeat single channel to 4 channels
+            noisy_4ch = noisy.repeat(4, 1, 1)
 
             # Resize if needed
-            if clean_1ch.shape[-1] != self.target_size:
-                clean_1ch = torch.nn.functional.interpolate(
-                    clean_1ch.unsqueeze(0), size=self.target_size, mode="bilinear"
+            if clean_4ch.shape[-1] != self.target_size:
+                clean_4ch = torch.nn.functional.interpolate(
+                    clean_4ch.unsqueeze(0), size=self.target_size, mode="bilinear"
                 ).squeeze(0)
-                noisy_1ch = torch.nn.functional.interpolate(
-                    noisy_1ch.unsqueeze(0), size=self.target_size, mode="bilinear"
+                noisy_4ch = torch.nn.functional.interpolate(
+                    noisy_4ch.unsqueeze(0), size=self.target_size, mode="bilinear"
                 ).squeeze(0)
 
             return {
-                "clean": clean_1ch,
-                "noisy": noisy_1ch,
-                "electrons": clean_1ch,  # Use as target electrons
-                "domain": torch.tensor([2]),  # Astronomy domain
+                "clean": clean_4ch,
+                "noisy": noisy_4ch,
+                "electrons": clean_4ch,  # Use 4-channel as target electrons
+                "domain": torch.tensor([0]),  # Photography domain
                 "metadata": {"synthetic": True},
             }
         else:
-            # Simple synthetic data - astronomy uses single channel grayscale
+            # Simple synthetic data
             return {
-                "clean": torch.rand(
-                    1, self.target_size, self.target_size
-                ),  # Single channel
-                "noisy": torch.rand(
-                    1, self.target_size, self.target_size
-                ),  # Single channel
-                "electrons": torch.rand(
-                    1, self.target_size, self.target_size
-                ),  # Single channel
-                "domain": torch.tensor([2]),  # Astronomy domain
+                "clean": torch.randn(4, self.target_size, self.target_size),
+                "noisy": torch.randn(4, self.target_size, self.target_size),
+                "electrons": torch.randn(4, self.target_size, self.target_size),
+                "domain": torch.tensor([0]),
                 "metadata": {"synthetic": True, "file": str(self.files[idx])},
                 "domain_params": {
-                    "scale": 50000.0,  # Astronomy scale for extreme low-light
+                    "scale": 1000.0,
                     "read_noise": 3.0,
                     "background": 100.0,
                     "gain": 1.0,
@@ -321,21 +284,21 @@ class DatasetWrapper:
         self.val_dataset = val_ds
 
 
-class AstronomyTrainingManager:
-    """Manager for training Poisson-Gaussian model on astronomy data."""
+class L2PhotographyTrainingManager:
+    """Manager for training L2 baseline model on photography data."""
 
     def __init__(
         self,
         data_root: str,
-        output_dir: str = "results/astronomy_training",
+        output_dir: str = "results/l2_photography_training",
         device: str = "auto",
         seed: int = 42,
     ):
         """
-        Initialize training manager.
+        Initialize L2 baseline training manager.
 
         Args:
-            data_root: Path to astronomy data directory
+            data_root: Path to photography data directory
             output_dir: Directory for outputs and checkpoints
             device: Device for training ('auto', 'cpu', 'cuda')
             seed: Random seed for reproducibility
@@ -354,7 +317,8 @@ class AstronomyTrainingManager:
             logger=logger, enable_recovery=True, strict_mode=False
         )
 
-        logger.info("🌌 Astronomy Training Manager initialized")
+        logger.info("📸 L2 Baseline Photography Training Manager initialized")
+        logger.info(f"  Guidance Type: L2 (MSE) Baseline")
         logger.info(f"  Data root: {self.data_root}")
         logger.info(f"  Output directory: {self.output_dir}")
         logger.info(f"  Device: {self.device}")
@@ -383,68 +347,6 @@ class AstronomyTrainingManager:
 
         return device
 
-    def create_astronomy_dataset(
-        self,
-        batch_size: int = 4,
-        target_size: int = 128,
-        max_files: Optional[int] = None,
-        validation_split: float = 0.2,
-        num_workers: int = 4,
-        pin_memory: bool = True,
-    ) -> MultiDomainDataset:
-        """
-        Create astronomy dataset with proper preprocessing.
-
-        Args:
-            batch_size: Batch size for training
-            target_size: Target image size for processing
-            max_files: Maximum number of files to use (for testing)
-            validation_split: Fraction of data for validation
-
-        Returns:
-            Configured MultiDomainDataset
-        """
-        logger.info("📁 Creating astronomy dataset...")
-
-        # Check data availability
-        if not self.data_root.exists():
-            raise FileNotFoundError(f"Data root directory not found: {self.data_root}")
-
-        # Find calibration file
-        calib_files = list(
-            (project_root / "configs/calibrations").glob("*astronomy*.json")
-        )
-        if not calib_files:
-            raise FileNotFoundError("Astronomy calibration file not found")
-
-        calib_file = calib_files[0]
-        logger.info(f"  Using calibration: {calib_file.name}")
-
-        # Create dataset configuration
-        domain_configs = {
-            "astronomy": {
-                "data_root": str(self.data_root),
-                "calibration_file": str(calib_file),
-                "scale": 50000.0,  # Astronomy scale for extreme low-light
-                "target_size": target_size,
-                "max_files": max_files,
-            }
-        }
-
-        dataset = MultiDomainDataset(
-            domain_configs=domain_configs,
-            split="train",
-            balance_domains=False,  # Only one domain
-        )
-
-        logger.info("✅ Dataset created successfully")
-        logger.info(f"  Training samples: {len(dataset.train_dataset)}")
-        logger.info(f"  Validation samples: {len(dataset.val_dataset)}")
-        logger.info(f"  Image size: {target_size}x{target_size}")
-        logger.info("  Optimized for extreme low-light astronomy imaging")
-
-        return dataset
-
     def create_model(
         self,
         use_multi_resolution: bool = False,
@@ -454,56 +356,48 @@ class AstronomyTrainingManager:
         **model_kwargs,
     ) -> nn.Module:
         """
-        Create EDM model for astronomy restoration (standard or multi-resolution).
+        Create EDM model for L2 baseline photography restoration.
+        IDENTICAL to Poisson-Gaussian model architecture.
 
         Args:
             use_multi_resolution: Whether to use multi-resolution progressive model
-            mixed_precision: Whether to enable mixed precision training
-            gradient_checkpointing: Whether to enable gradient checkpointing for memory optimization
-            ddp_find_unused_parameters: Whether to find unused parameters in DDP
             **model_kwargs: Additional model configuration
 
         Returns:
             Configured EDM model
         """
-        logger.info("🤖 Creating EDM model for astronomy...")
+        logger.info("🤖 Creating EDM model for L2 baseline photography...")
 
         # Determine domain for channel configuration
-        domain = "astronomy"
+        # Default to photography for now, but this could be made configurable
+        domain = "photography"  # Could be made a parameter later
 
         if use_multi_resolution:
             logger.info(f"📈 Using Progressive Multi-Resolution EDM for {domain} domain")
 
-            # Multi-resolution model configuration - Optimized for astronomy
-            # Astronomy requires maximum precision for extreme low-light
-            default_model_channels = model_kwargs.get(
-                "model_channels", 256
-            )  # Research-grade model size
-            default_channel_mult = model_kwargs.get(
-                "channel_mult", [1, 2, 3, 4]
-            )  # More stages
+            # Multi-resolution model configuration - IDENTICAL to Poisson-Gaussian
+            default_model_channels = model_kwargs.get("model_channels", 256)
+            default_channel_mult = model_kwargs.get("channel_mult", [1, 2, 3, 4])
             default_channel_mult_emb = model_kwargs.get("channel_mult_emb", 6)
-            default_num_blocks = model_kwargs.get(
-                "num_blocks", 6
-            )  # Unified base architecture
+            default_num_blocks = model_kwargs.get("num_blocks", 6)
             default_attn_resolutions = model_kwargs.get(
                 "attn_resolutions", [16, 32, 64]
             )  # Multi-scale attention optimized for patches
 
-            # Use full resolution range for astronomy
+            # Use full resolution range for enhanced models
             min_resolution = 32
             max_resolution = 128 if default_model_channels >= 128 else 64
-            num_stages = 5 if default_model_channels >= 128 else 4
+            num_stages = 4 if default_model_channels >= 128 else 3
 
             model = create_progressive_edm(
                 min_resolution=min_resolution,
                 max_resolution=max_resolution,
                 num_stages=num_stages,
                 model_channels=default_model_channels,
-                img_channels=1,  # Astronomy data typically has 1 channel (grayscale)
+                img_channels=4,  # Photography data has 4 channels (RGBA)
                 label_dim=6,  # Domain conditioning
                 use_fp16=False,
-                dropout=0.02,  # Very low dropout for maximum precision
+                dropout=0.1,
                 **{
                     k: v
                     for k, v in model_kwargs.items()
@@ -518,37 +412,37 @@ class AstronomyTrainingManager:
                 },
             )
 
-            logger.info(f"🔧 Progressive EDM configuration for {domain} domain")
-            logger.info(f"   Model channels: {default_model_channels}")
-            logger.info(f"   Max resolution: {max_resolution}x{max_resolution}")
-            logger.info(f"   Optimized for extreme low-light precision")
+            # For memory optimization, we'll use a smaller model configuration
+            # that can fit in GPU memory even with mixed precision
+            logger.info(
+                f"🔧 Using memory-optimized Progressive EDM configuration for {domain} domain"
+            )
+            logger.info(f"   Model channels: {model_kwargs.get('model_channels', 64)}")
+            logger.info(f"   Max resolution: 64x64 (memory optimized)")
+            logger.info(f"   Configuration optimized for memory efficiency")
 
+            # Mixed precision can work with EDM models if we use it carefully
+            # We'll enable it but monitor memory usage
             if mixed_precision:
                 logger.info("🔧 Mixed precision enabled for Progressive EDM models")
         else:
             logger.info(f"📊 Using Standard EDM for {domain} domain")
 
-            # Default model configuration for astronomy - Research-grade
-            default_model_channels = model_kwargs.get(
-                "model_channels", 256
-            )  # Research-grade model size
-            default_channel_mult = model_kwargs.get(
-                "channel_mult", [1, 2, 3, 4]
-            )  # More stages
+            # Default model configuration for photography - IDENTICAL to Poisson-Gaussian
+            default_model_channels = model_kwargs.get("model_channels", 256)
+            default_channel_mult = model_kwargs.get("channel_mult", [1, 2, 3, 4])
             default_channel_mult_emb = model_kwargs.get("channel_mult_emb", 6)
-            default_num_blocks = model_kwargs.get(
-                "num_blocks", 6
-            )  # Unified base architecture
+            default_num_blocks = model_kwargs.get("num_blocks", 6)
             default_attn_resolutions = model_kwargs.get(
                 "attn_resolutions", [16, 32, 64]
-            )  # Multi-scale optimized for patches
+            )  # Multi-scale attention optimized for patches
 
-            # Use maximum resolution for astronomy
+            # Use full resolution for enhanced models, memory-optimized for smaller models
             img_resolution = 128 if default_model_channels >= 128 else 64
 
             model_config = {
                 "img_resolution": img_resolution,
-                "img_channels": 1,  # Astronomy data typically has 1 channel
+                "img_channels": 4,  # Photography data has 4 channels (RGBA)
                 "model_channels": default_model_channels,
                 "channel_mult": default_channel_mult,
                 "channel_mult_emb": default_channel_mult_emb,
@@ -556,7 +450,7 @@ class AstronomyTrainingManager:
                 "attn_resolutions": default_attn_resolutions,
                 "label_dim": 6,  # Domain conditioning
                 "use_fp16": False,  # Will use mixed precision training instead
-                "dropout": 0.02,  # Very low dropout for maximum precision
+                "dropout": 0.1,
                 **{
                     k: v
                     for k, v in model_kwargs.items()
@@ -574,40 +468,46 @@ class AstronomyTrainingManager:
             model = create_edm_wrapper(**model_config)
 
             # Log the actual model configuration being used
-            model_channels = model_kwargs.get("model_channels", 128)
+            model_channels = model_kwargs.get("model_channels", 64)
             is_enhanced = model_channels >= 128
 
             if is_enhanced:
-                logger.info("🚀 Using MAXIMUM PRECISION EDM configuration for astronomy")
+                logger.info(
+                    "🚀 Using ENHANCED EDM configuration for L2 baseline research-level performance"
+                )
                 logger.info(f"   Model channels: {model_channels}")
                 logger.info(
-                    f"   Channel mult: {model_kwargs.get('channel_mult', [1, 2, 3, 4])}"
+                    f"   Channel mult: {model_kwargs.get('channel_mult', [1, 2, 2])}"
                 )
-                logger.info(f"   Num blocks: {model_kwargs.get('num_blocks', 5)}")
+                logger.info(f"   Num blocks: {model_kwargs.get('num_blocks', 3)}")
                 logger.info(
                     f"   Attention resolutions: {model_kwargs.get('attn_resolutions', [16, 32, 64])}"
                 )
                 logger.info(f"   Image resolution: {img_resolution}x{img_resolution}")
             else:
                 logger.info(
-                    "🔧 Using precision-optimized EDM configuration for astronomy"
+                    "🔧 Using memory-optimized EDM configuration for L2 baseline"
                 )
                 logger.info(f"   Model channels: {model_channels}")
-                logger.info(
-                    f"   Configuration optimized for extreme low-light precision"
-                )
+                logger.info(f"   Configuration optimized for memory efficiency")
 
+            # Mixed precision can work with EDM models if we use it carefully
+            # We'll enable it but monitor memory usage
             if mixed_precision:
                 logger.info("🔧 Mixed precision enabled for EDM models")
 
-        # Enable gradient checkpointing if requested
+        # Enable gradient checkpointing if requested (IDENTICAL to Poisson-Gaussian)
         if gradient_checkpointing:
             logger.info("🔧 Enabling gradient checkpointing for memory optimization...")
+
+            # Try to apply gradient checkpointing directly to the EDM model
             applied = False
 
             # For single GPU training (no DDP), we can use a simple wrapper
             if "RANK" not in os.environ or os.environ.get("WORLD_SIZE", "1") == "1":
                 try:
+                    # Use module-level CheckpointedEDM class to avoid pickling issues
+
                     model = CheckpointedEDM(model)
                     logger.info(
                         "✅ Gradient checkpointing enabled with wrapper (single GPU mode)"
@@ -647,11 +547,10 @@ class AstronomyTrainingManager:
         param_count = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-        logger.info("✅ Model created successfully")
+        logger.info("✅ L2 baseline model created successfully")
         logger.info(f"  Total parameters: {param_count:,}")
         logger.info(f"  Trainable parameters: {trainable_params:,}")
         logger.info(f"  Model device: {next(model.parameters()).device}")
-        logger.info(f"  Optimized for astronomy extreme low-light imaging")
 
         # Wrap model with DistributedDataParallel if in distributed mode
         if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
@@ -677,31 +576,43 @@ class AstronomyTrainingManager:
                 )
 
                 logger.info(f"✅ Model wrapped with DDP on device cuda:{local_rank}")
+                logger.info(f"   find_unused_parameters: {ddp_find_unused_parameters}")
+                logger.info(f"   broadcast_buffers: True")
+            else:
+                logger.warning(
+                    "⚠️  RANK/WORLD_SIZE set but distributed not initialized, using single GPU"
+                )
+        else:
+            logger.info("🔧 Single GPU mode - no DDP wrapping needed")
 
         return model
 
     def create_training_config(
         self,
-        num_epochs: int = 200,  # More epochs for astronomy precision
-        learning_rate: float = 2e-5,  # Very low learning rate for stability
-        batch_size: int = 4,  # Updated for 32 effective batch size
+        num_epochs: int = 100,
+        max_steps: Optional[int] = None,
+        learning_rate: float = 1e-4,
+        batch_size: int = 4,
         mixed_precision: bool = True,
-        gradient_accumulation_steps: int = 8,  # Updated: 4 × 8 = 32 effective batch
-        save_frequency_steps: int = 10000,  # More frequent saves
-        early_stopping_patience_steps: int = 15000,  # More patience for convergence
-        validation_checkpoints_patience: int = 50,
+        gradient_accumulation_steps: int = 1,
+        save_frequency_steps: int = 50000,
+        early_stopping_patience_steps: int = 5000,
+        validation_checkpoints_patience: int = 20,
         lr_scheduler: str = "cosine",
-        warmup_epochs: int = 15,  # Extended warmup for stability
-        val_frequency: int = 2,  # More frequent validation
-        gradient_clip_norm: float = 0.1,  # Very conservative clipping
+        warmup_epochs: int = 5,
+        val_frequency: int = 5,
+        val_frequency_steps: Optional[int] = None,
+        gradient_clip_norm: float = 1.0,
+        prefetch_factor: int = 2,
         **config_kwargs,
     ) -> MultiDomainTrainingConfig:
         """
-        Create comprehensive training configuration optimized for astronomy.
+        Create comprehensive training configuration for L2 baseline.
+        IDENTICAL to Poisson-Gaussian except guidance type.
 
         Args:
             num_epochs: Number of training epochs
-            learning_rate: Learning rate (very low for astronomy stability)
+            learning_rate: Learning rate
             batch_size: Training batch size
             lr_scheduler: Learning rate scheduler type
             warmup_epochs: Number of warmup epochs
@@ -711,9 +622,9 @@ class AstronomyTrainingManager:
         Returns:
             Configured training configuration
         """
-        logger.info("⚙️  Creating astronomy training configuration...")
+        logger.info("⚙️  Creating L2 baseline training configuration...")
 
-        # Domain balancing configuration optimized for astronomy
+        # Domain balancing configuration (IDENTICAL)
         domain_balancing = DomainBalancingConfig(
             sampling_strategy="weighted",
             use_domain_conditioning=True,
@@ -721,63 +632,68 @@ class AstronomyTrainingManager:
             enforce_batch_balance=True,
             min_samples_per_domain_per_batch=1,
             adaptive_rebalancing=True,
-            rebalancing_frequency=25,  # Frequent rebalancing
-            performance_window=10,  # Short window for responsiveness
+            rebalancing_frequency=100,
+            performance_window=50,
             log_domain_stats=True,
-            domain_stats_frequency=10,  # Frequent logging
+            domain_stats_frequency=50,
         )
 
-        # Main training configuration
+        # Main training configuration - IDENTICAL except guidance type
         config = MultiDomainTrainingConfig(
             # Model and data
-            model_name="poisson_diffusion_astronomy",
+            model_name="l2_baseline_photography",
             dataset_path=str(self.data_root),
-            # Training hyperparameters optimized for astronomy
+            # Training hyperparameters
             num_epochs=num_epochs,
+            max_steps=max_steps,
             batch_size=batch_size,
             learning_rate=learning_rate,
             warmup_epochs=warmup_epochs,
-            # Optimizer with very conservative settings
+            # Optimizer
             optimizer="adamw",
-            weight_decay=1e-3,  # Very low weight decay for stability
+            weight_decay=1e-2,
             beta1=0.9,
             beta2=0.999,
             eps=1e-8,
             # Scheduler
             scheduler=lr_scheduler,
-            min_lr=1e-7,  # Extremely low minimum learning rate
-            scheduler_patience=20,  # More patience
-            # Loss function
-            loss_type="poisson_gaussian",
+            min_lr=1e-6,
+            scheduler_patience=10,
+            # Loss function - L2 BASELINE INSTEAD OF POISSON-GAUSSIAN
+            loss_type="mse",  # THIS IS THE KEY DIFFERENCE
             gradient_clip_norm=gradient_clip_norm,
             # Validation and checkpointing
-            val_frequency=val_frequency,
+            val_frequency=val_frequency,  # Configurable validation frequency
+            val_frequency_steps=val_frequency_steps,  # Step-based validation frequency
             save_frequency_steps=save_frequency_steps,
-            max_checkpoints=10,  # Keep more checkpoints
+            max_checkpoints=5,
             early_stopping_patience_steps=early_stopping_patience_steps,
             validation_checkpoints_patience=validation_checkpoints_patience,
-            early_stopping_min_delta=1e-5,  # Very small delta for precision
+            early_stopping_min_delta=1e-4,
             # Reproducibility
             seed=self.seed,
             deterministic=True,
             benchmark=True,
             # Logging and monitoring
-            log_frequency=10,  # Very frequent logging
+            log_frequency=50,
             tensorboard_log_dir=str(self.output_dir / "tensorboard"),
             checkpoint_dir=str(self.output_dir / "checkpoints"),
             # Device and performance
             device=self.device,
             mixed_precision=mixed_precision,
             compile_model=False,  # May cause issues with some setups
+            prefetch_factor=prefetch_factor,
             # Multi-domain configuration
             domain_balancing=domain_balancing,
             **config_kwargs,
         )
 
-        logger.info("✅ Astronomy training configuration created")
+        logger.info("✅ L2 baseline training configuration created")
+        logger.info(f"  Guidance Type: L2 (MSE) Baseline")
         logger.info(f"  Training epochs: {num_epochs}")
-        logger.info(f"  Batch size: {batch_size} (optimized for astronomy)")
-        logger.info(f"  Learning rate: {learning_rate} (very low for stability)")
+        logger.info(f"  Max steps: {max_steps} (overrides epochs if set)")
+        logger.info(f"  Batch size: {batch_size}")
+        logger.info(f"  Learning rate: {learning_rate}")
         logger.info(f"  LR scheduler: {lr_scheduler}")
         logger.info(f"  Warmup epochs: {warmup_epochs}")
         logger.info(f"  Validation frequency: {val_frequency} epochs")
@@ -785,99 +701,19 @@ class AstronomyTrainingManager:
             f"  Early stopping patience: {config.early_stopping_patience_steps} steps"
         )
         logger.info(f"  Mixed precision: {config.mixed_precision}")
-        logger.info(f"  Gradient clip norm: {gradient_clip_norm} (very conservative)")
 
         return config
-
-    def setup_monitoring(self):
-        """Setup comprehensive monitoring and logging for astronomy."""
-        logger.info("📊 Setting up astronomy monitoring...")
-
-        # Create monitoring directory
-        monitoring_dir = self.output_dir / "monitoring"
-        monitoring_dir.mkdir(exist_ok=True)
-
-        # Setup TensorBoard logging
-        tensorboard_dir = monitoring_dir / "tensorboard"
-        tensorboard_dir.mkdir(exist_ok=True)
-
-        # Create monitoring script for real-time tracking
-        monitoring_script = monitoring_dir / "monitor_astronomy_training.py"
-
-        monitoring_code = '''
-import time
-import torch
-import psutil
-import json
-from pathlib import Path
-
-def monitor_astronomy_training(log_file="logs/training_astronomy.log"):
-    """Monitor astronomy training progress in real-time."""
-    print("🌌 Real-time Astronomy Training Monitor")
-    print("=" * 60)
-
-    last_epoch = -1
-    last_loss = None
-
-    while True:
-        try:
-            # Check if training is still running
-            if not any("python" in p.info["name"] and "astronomy" in " ".join(p.cmdline())
-                      for p in psutil.process_iter(["pid", "name", "cmdline"])):
-                print("⏹️  Training process ended")
-                break
-
-            # Monitor GPU if available
-            if torch.cuda.is_available():
-                gpu_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.mem_get_info()[0]
-                gpu_util = torch.cuda.utilization()
-                print(f"🖥️  GPU Memory: {gpu_memory / 1e9:.1f} GB used, Utilization: {gpu_util}%")
-
-            # Monitor CPU and RAM
-            cpu_percent = psutil.cpu_percent()
-            ram_percent = psutil.virtual_memory().percent
-            print(f"💻 CPU: {cpu_percent:.1f}%, RAM: {ram_percent:.1f}%")
-
-            # Check for new log entries (simplified)
-            if Path(log_file).exists():
-                print("📝 Astronomy training log updated...")
-
-            print("-" * 40)
-            time.sleep(30)  # Check every 30 seconds
-
-        except KeyboardInterrupt:
-            print("⏹️  Monitor stopped by user")
-            break
-        except Exception as e:
-            print(f"⚠️  Monitor error: {e}")
-            time.sleep(60)
-
-if __name__ == "__main__":
-    monitor_astronomy_training()
-'''
-
-        with open(monitoring_script, "w") as f:
-            f.write(monitoring_code)
-
-        # Make monitoring script executable
-        monitoring_script.chmod(0o755)
-
-        logger.info("✅ Astronomy monitoring setup complete")
-        logger.info(f"  TensorBoard: {tensorboard_dir}")
-        logger.info(f"  Monitor script: {monitoring_script}")
-        logger.info("  Use: python monitor_astronomy_training.py to track training")
-
-        return monitoring_dir
 
     def train(
         self,
         model: nn.Module,
-        dataset: MultiDomainDataset,
+        dataset,
         config: MultiDomainTrainingConfig,
         resume_from_checkpoint: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Train the model with comprehensive monitoring.
+        Train the L2 baseline model with comprehensive monitoring.
+        IDENTICAL to Poisson-Gaussian training except guidance type.
 
         Args:
             model: Model to train
@@ -888,45 +724,20 @@ if __name__ == "__main__":
         Returns:
             Training results and metrics
         """
-        logger.info("🚀 Starting astronomy training...")
+        logger.info("🚀 Starting L2 baseline photography training...")
         logger.info("=" * 60)
 
         # Set deterministic mode
         set_deterministic_mode(seed=self.seed)
 
-        # Create custom collate function for astronomy data (if available)
-        astronomy_collate_fn = None
-        if (
-            hasattr(self, "astronomy_preprocessor")
-            and self.astronomy_preprocessor is not None
-            and HAS_ASTRONOMY_PREPROCESSOR
-            and create_astronomy_collate_fn is not None
-        ):
-            astronomy_collate_fn = create_astronomy_collate_fn(
-                self.astronomy_preprocessor
-            )
-            logger.info(
-                "🔬 Using custom astronomy collate function for Hubble Legacy Field data"
-            )
-        else:
-            logger.info(
-                "📊 Using standard collate function (astronomy preprocessor not available)"
-            )
-
-        # Create trainer
-        trainer_kwargs = {
-            "model": model,
-            "train_dataset": dataset.train_dataset,
-            "val_dataset": dataset.val_dataset,
-            "config": config,
-            "output_dir": self.output_dir,
-        }
-
-        # Only pass collate_fn if it's not None
-        if astronomy_collate_fn is not None:
-            trainer_kwargs["collate_fn"] = astronomy_collate_fn
-
-        trainer = MultiDomainTrainer(**trainer_kwargs)
+        # Create trainer with L2 guidance
+        trainer = MultiDomainTrainer(
+            model=model,
+            train_dataset=dataset.train_dataset,
+            val_dataset=dataset.val_dataset,
+            config=config,
+            output_dir=self.output_dir,
+        )
 
         # Setup checkpoint resumption
         if resume_from_checkpoint:
@@ -952,15 +763,17 @@ if __name__ == "__main__":
                 "training_history": dict(training_history),
                 "config": config.to_dict(),
                 "device": str(self.device),
-                "domain": "astronomy",
+                "guidance_type": "l2_baseline",
             }
 
             # Save results
+            # Ensure output directory exists before saving results
+            self.output_dir.mkdir(parents=True, exist_ok=True)
             results_file = self.output_dir / "training_results.json"
             with open(results_file, "w") as f:
                 json.dump(results, f, indent=2, default=str)
 
-            logger.info("✅ Astronomy training completed successfully!")
+            logger.info("✅ L2 baseline photography training completed successfully!")
             logger.info(f"  Total time: {training_time / 3600:.2f} hours")
             logger.info(f"  Best validation loss: {trainer.best_val_loss:.6f}")
             logger.info(f"  Results saved to: {results_file}")
@@ -970,7 +783,7 @@ if __name__ == "__main__":
         except Exception as e:
             error_time = time.time() - start_time
             logger.error(
-                f"❌ Astronomy training failed after {error_time / 3600:.2f} hours: {e}"
+                f"❌ L2 baseline photography training failed after {error_time / 3600:.2f} hours: {e}"
             )
 
             # Save partial results
@@ -979,9 +792,11 @@ if __name__ == "__main__":
                 "training_time_hours": error_time / 3600,
                 "failed_epoch": getattr(trainer, "current_epoch", 0),
                 "device": str(self.device),
-                "domain": "astronomy",
+                "guidance_type": "l2_baseline",
             }
 
+            # Ensure output directory exists before saving error file
+            self.output_dir.mkdir(parents=True, exist_ok=True)
             error_file = self.output_dir / "training_error.json"
             with open(error_file, "w") as f:
                 json.dump(error_results, f, indent=2, default=str)
@@ -990,9 +805,11 @@ if __name__ == "__main__":
 
 
 def main():
-    """Main training function."""
+    """Main L2 baseline training function."""
+    # Distributed training is already initialized at the top of the script
+
     parser = argparse.ArgumentParser(
-        description="Train Poisson-Gaussian diffusion model on astronomy data"
+        description="Train L2 baseline diffusion model on photography data"
     )
 
     # Data arguments
@@ -1000,30 +817,22 @@ def main():
         "--data_root",
         type=str,
         required=True,
-        help="Path to astronomy data directory",
+        help="Path to photography data directory",
     )
 
     # Training arguments
     parser.add_argument(
-        "--epochs", type=int, default=200, help="Number of training epochs"
+        "--epochs", type=int, default=100, help="Number of training epochs"
     )
     parser.add_argument(
         "--max_steps",
         type=int,
-        default=150000,
+        default=100000,  # L2 BASELINE: 100K steps instead of 150K
         help="Maximum training steps (overrides epochs if set)",
     )
+    parser.add_argument("--batch_size", type=int, default=4, help="Training batch size")
     parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=6,
-        help="Training batch size (unified configuration)",
-    )
-    parser.add_argument(
-        "--learning_rate",
-        type=float,
-        default=2e-5,
-        help="Learning rate (very low for astronomy stability)",
+        "--learning_rate", type=float, default=1e-4, help="Learning rate"
     )
     parser.add_argument(
         "--target_size", type=int, default=128, help="Target image size"
@@ -1038,13 +847,13 @@ def main():
     parser.add_argument(
         "--warmup_steps",
         type=int,
-        default=3000,
+        default=1000,
         help="Number of warmup steps (will be converted to epochs)",
     )
     parser.add_argument(
         "--val_frequency",
         type=int,
-        default=2,
+        default=5,
         help="Validation frequency in epochs (ignored if val_frequency_steps is set)",
     )
     parser.add_argument(
@@ -1054,12 +863,9 @@ def main():
         help="Validation frequency in training steps (overrides val_frequency if set)",
     )
 
-    # Model arguments
+    # Model arguments (IDENTICAL to Poisson-Gaussian)
     parser.add_argument(
-        "--model_channels",
-        type=int,
-        default=256,
-        help="Number of model channels (research-grade for astronomy)",
+        "--model_channels", type=int, default=256, help="Number of model channels"
     )
     parser.add_argument(
         "--num_blocks", type=int, default=6, help="Number of model blocks"
@@ -1070,7 +876,7 @@ def main():
         help="Use multi-resolution progressive EDM model",
     )
 
-    # Enhanced model architecture arguments
+    # Enhanced model architecture arguments (IDENTICAL)
     parser.add_argument(
         "--channel_mult",
         type=int,
@@ -1096,7 +902,7 @@ def main():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="results/astronomy_training",
+        default="results/l2_photography_training",
         help="Output directory",
     )
     parser.add_argument(
@@ -1116,12 +922,12 @@ def main():
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
 
-    # Performance arguments
+    # Performance arguments (IDENTICAL)
     parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
-        default=8,
-        help="Number of gradient accumulation steps (for 32 effective batch)",
+        default=1,
+        help="Number of gradient accumulation steps",
     )
     parser.add_argument(
         "--mixed_precision",
@@ -1154,46 +960,37 @@ def main():
         help="Number of batches to prefetch (0 to disable)",
     )
 
-    # DDP optimization arguments
-    parser.add_argument(
-        "--ddp_find_unused_parameters",
-        type=str,
-        default="false",
-        choices=["true", "false"],
-        help="Find unused parameters in DDP (slower but sometimes necessary)",
-    )
-
-    # Checkpointing arguments
+    # Checkpointing arguments (IDENTICAL)
     parser.add_argument(
         "--save_frequency_steps",
         type=int,
-        default=10000,
-        help="Save checkpoint every N steps",
+        default=800,
+        help="Save checkpoint every N steps (more frequent for better recovery)",
     )
     parser.add_argument(
         "--early_stopping_patience_steps",
         type=int,
-        default=15000,
+        default=5000,
         help="Early stopping patience in steps",
     )
     parser.add_argument(
         "--validation_checkpoints_patience",
         type=int,
-        default=50,
+        default=20,
         help="Early stopping patience in validation checkpoints",
     )
     parser.add_argument(
         "--gradient_clip_norm",
         type=float,
-        default=0.1,
-        help="Gradient clipping norm threshold (very conservative)",
+        default=1.0,
+        help="Gradient clipping norm threshold",
     )
 
-    # Advanced checkpointing arguments
+    # Advanced checkpointing arguments (IDENTICAL)
     parser.add_argument(
         "--max_checkpoints",
         type=int,
-        default=10,
+        default=5,
         help="Maximum number of checkpoints to keep",
     )
     parser.add_argument(
@@ -1231,6 +1028,15 @@ def main():
         help="Resume training from best checkpoint instead of latest",
     )
 
+    # DDP optimization arguments
+    parser.add_argument(
+        "--ddp_find_unused_parameters",
+        type=str,
+        default="false",
+        choices=["true", "false"],
+        help="Find unused parameters in DDP (slower but sometimes necessary)",
+    )
+
     # Testing arguments
     parser.add_argument(
         "--max_files",
@@ -1239,14 +1045,15 @@ def main():
         help="Maximum number of files to use (for testing)",
     )
     parser.add_argument(
-        "--quick_test", action="store_true", help="Run quick test with synthetic data"
+        "--quick_test",
+        action="store_true",
+        help="Run quick test with synthetic data (NOT for real training - use only for testing)",
     )
 
     args = parser.parse_args()
 
     # Convert string boolean arguments to actual booleans
     args.mixed_precision = args.mixed_precision.lower() == "true"
-    args.gradient_checkpointing = args.gradient_checkpointing.lower() == "true"
     args.pin_memory = args.pin_memory.lower() == "true"
     args.save_best_model = args.save_best_model.lower() == "true"
     args.save_optimizer_state = args.save_optimizer_state.lower() == "true"
@@ -1257,45 +1064,19 @@ def main():
     is_distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
     is_main_process = not is_distributed or int(os.environ.get("RANK", "0")) == 0
 
-    # Initialize training manager
+    # Initialize L2 baseline training manager
     if is_main_process:
-        logger.info("🚀 INITIALIZING ASTRONOMY TRAINING")
+        logger.info("🚀 INITIALIZING L2 BASELINE PHOTOGRAPHY TRAINING")
         logger.info("=" * 60)
 
-    training_manager = AstronomyTrainingManager(
+    training_manager = L2PhotographyTrainingManager(
         data_root=args.data_root,
         output_dir=args.output_dir,
         device=args.device,
         seed=args.seed,
     )
 
-    # Initialize astronomy preprocessor for real data (if available and not quick_test)
-    astronomy_preprocessor = None
-    if not args.quick_test and HAS_ASTRONOMY_PREPROCESSOR:
-        # Astronomy preprocessor available - use it for enhanced processing
-        astronomy_preprocessor = AstronomyDataPreprocessor(
-            offset_method="adaptive",  # Best for Hubble Legacy Field data
-            target_channels=1,  # Single channel for astronomy
-            preserve_noise_statistics=True,
-            min_offset=100.0,  # Ensure sufficient offset for Poisson modeling
-        )
-        logger.info("🔬 Initialized astronomy preprocessor for Hubble Legacy Field data")
-    elif not args.quick_test:
-        logger.info(
-            "📊 Astronomy preprocessor not available - using standard preprocessing"
-        )
-
-    # Store preprocessor in training manager for later use
-    if astronomy_preprocessor is not None:
-        training_manager.astronomy_preprocessor = astronomy_preprocessor
-
-    # Setup monitoring (only on main process)
-    if is_main_process:
-        monitoring_dir = training_manager.setup_monitoring()
-    else:
-        monitoring_dir = None
-
-    # Create model (enable multi-resolution if requested)
+    # Create model (IDENTICAL architecture to Poisson-Gaussian)
     model_kwargs = {
         "model_channels": args.model_channels,
         "num_blocks": args.num_blocks,
@@ -1309,66 +1090,76 @@ def main():
     if args.attn_resolutions is not None:
         model_kwargs["attn_resolutions"] = args.attn_resolutions
 
+    # Convert gradient checkpointing argument
+    gradient_checkpointing = args.gradient_checkpointing.lower() == "true"
+
     model = training_manager.create_model(
         use_multi_resolution=args.multi_resolution,
         mixed_precision=args.mixed_precision,
-        gradient_checkpointing=args.gradient_checkpointing,
+        gradient_checkpointing=gradient_checkpointing,
         ddp_find_unused_parameters=args.ddp_find_unused_parameters,
         **model_kwargs,
     )
 
-    # Create dataset - REAL DATA ONLY
+    # Create dataset (IDENTICAL to Poisson-Gaussian)
     if args.quick_test:
-        logger.error("❌ --quick_test flag not supported in real-data-only mode!")
-        logger.error("   Remove --quick_test flag to use real preprocessed data.")
-        logger.error("   Ensure preprocessed astronomy data exists in --data_root")
-        sys.exit(1)
-    else:
-        # Use real preprocessed data
-        logger.info("📁 Loading real preprocessed astronomy data...")
-        try:
-            from data.preprocessed_datasets import create_preprocessed_datasets
-        except ImportError as e:
-            logger.error(f"❌ Failed to import preprocessed_datasets: {e}")
-            logger.error(
-                "   Please ensure the data preprocessing modules are available"
-            )
-            sys.exit(1)
-
-        # Training config functions (with fallback)
-        try:
-            from utils.training_config import (
-                calculate_optimal_training_config,
-                print_training_analysis,
-            )
-        except ImportError as e:
-            logger.warning(f"⚠️  Training config utils not available: {e}")
-            logger.warning("   Using basic configuration...")
-
-            def calculate_optimal_training_config(dataset_size, batch_size):
-                """Fallback training config calculation."""
-                steps_per_epoch = dataset_size // batch_size
-                return {
-                    "steps_per_epoch": steps_per_epoch,
-                    "total_training_steps": steps_per_epoch * 200,  # Assume 200 epochs
-                    "steps_per_sample": 200.0,
-                }
-
-            def print_training_analysis(config):
-                """Fallback training analysis."""
-                logger.info("📊 Basic Training Configuration:")
-                logger.info(f"  Steps per epoch: {config['steps_per_epoch']}")
-                logger.info(f"  Total training steps: {config['total_training_steps']}")
-                logger.info(f"  Steps per sample: {config['steps_per_sample']:.1f}")
-
-        # Astronomy preprocessor is initialized at the top level (line 1226-1234)
-
-        train_dataset, val_dataset = create_preprocessed_datasets(
-            data_root=args.data_root,
-            domain="astronomy",
-            max_files=args.max_files,
-            seed=args.seed,
+        logger.warning("🧪 QUICK TEST MODE: Using synthetic data for testing only!")
+        logger.warning(
+            "⚠️  This is NOT real training data - results will not be scientifically valid"
         )
+        # Generate synthetic data for testing
+        from scripts.generate_synthetic_data import (
+            SyntheticConfig,
+            SyntheticDataGenerator,
+        )
+
+        synthetic_config = SyntheticConfig(
+            output_dir="data/synthetic_quick",
+            num_images=100,
+            image_size=args.target_size,
+            pattern_types=["constant", "gradient"],
+            photon_levels=[10, 100, 1000],
+            read_noise_levels=[1, 5],
+        )
+
+        synthetic_generator = SyntheticDataGenerator(synthetic_config)
+        logger.info("🔄 Generating synthetic data...")
+        results = synthetic_generator.generate_validation_set()
+        synthetic_generator.save_dataset(results)
+
+        # Use module-level SyntheticDataset class to avoid pickling issues
+        # Use module-level SyntheticSubset class to avoid pickling issues
+        dataset = SyntheticDataset(synthetic_config.output_dir, args.target_size)
+
+        # Validate synthetic dataset was created successfully
+        if len(dataset) == 0:
+            logger.error("❌ Failed to create synthetic dataset")
+            logger.error(f"   Output directory: {synthetic_config.output_dir}")
+            raise SystemExit("Synthetic dataset creation failed")
+    else:
+        # Use real preprocessed data (IDENTICAL to Poisson-Gaussian)
+        logger.info("📁 Loading real preprocessed photography data...")
+        from data.preprocessed_datasets import create_preprocessed_datasets
+        from utils.training_config import (
+            calculate_optimal_training_config,
+            print_training_analysis,
+        )
+
+        try:
+            train_dataset, val_dataset = create_preprocessed_datasets(
+                data_root=args.data_root,
+                domain="photography",
+                max_files=args.max_files,
+                seed=args.seed,
+            )
+        except Exception as e:
+            logger.error(f"❌ Failed to load real preprocessed data: {e}")
+            logger.error(f"   Expected data directory: {args.data_root}")
+            logger.error(f"   Make sure you have run data preprocessing first:")
+            logger.error(
+                f"     python scripts/preprocess_data.py --data_root {args.data_root}"
+            )
+            raise SystemExit(f"Real data loading failed: {e}")
 
         # Calculate optimal training configuration
         dataset_size = len(train_dataset)
@@ -1376,7 +1167,7 @@ def main():
             dataset_size, args.batch_size
         )
 
-        logger.info("🎯 AUTOMATIC ASTRONOMY TRAINING CONFIGURATION:")
+        logger.info("🎯 AUTOMATIC L2 BASELINE TRAINING CONFIGURATION:")
         print_training_analysis(optimal_config)
 
         # Check if training steps are reasonable (diffusion standard)
@@ -1407,7 +1198,8 @@ def main():
                 f"   Steps per sample: {current_total_steps / dataset_size:.1f}"
             )
 
-        # Create a simple dataset wrapper with train/val attributes
+        # Use module-level DatasetWrapper class to avoid pickling issues
+
         dataset = DatasetWrapper(train_dataset, val_dataset)
 
     # Convert warmup_steps to warmup_epochs if needed
@@ -1423,9 +1215,10 @@ def main():
         )
         logger.info(f"   Steps per epoch: {steps_per_epoch}")
 
-    # Create training configuration
+    # Create training configuration (IDENTICAL except guidance type)
     config = training_manager.create_training_config(
         num_epochs=args.epochs,
+        max_steps=args.max_steps,
         learning_rate=args.learning_rate,
         batch_size=args.batch_size,
         mixed_precision=args.mixed_precision,
@@ -1436,7 +1229,9 @@ def main():
         lr_scheduler=args.lr_scheduler,
         warmup_epochs=warmup_epochs,
         val_frequency=args.val_frequency,
+        val_frequency_steps=args.val_frequency_steps,
         gradient_clip_norm=args.gradient_clip_norm,
+        prefetch_factor=args.prefetch_factor,
     )
 
     # Save configuration (only on main process)
@@ -1448,7 +1243,7 @@ def main():
 
     # Start training
     if is_main_process:
-        logger.info("🎯 STARTING ASTRONOMY TRAINING")
+        logger.info("🎯 STARTING L2 BASELINE TRAINING")
         logger.info("=" * 60)
 
     try:
@@ -1461,7 +1256,7 @@ def main():
 
         # Success summary (only on main process)
         if is_main_process:
-            logger.info("🎉 ASTRONOMY TRAINING COMPLETED SUCCESSFULLY!")
+            logger.info("🎉 L2 BASELINE PHOTOGRAPHY TRAINING COMPLETED SUCCESSFULLY!")
             logger.info("=" * 60)
             logger.info("📊 Final Results:")
             logger.info(f"  Training time: {results['training_time_hours']:.2f} hours")
@@ -1473,12 +1268,10 @@ def main():
             logger.info(
                 f"  Results: {training_manager.output_dir}/training_results.json"
             )
-            if monitoring_dir:
-                logger.info(f"  Logs: {monitoring_dir}/")
             logger.info("=" * 60)
 
     except Exception as e:
-        logger.error(f"❌ Astronomy training failed: {e}")
+        logger.error(f"❌ L2 baseline photography training failed: {e}")
         logger.error("Check logs for details")
         raise
 

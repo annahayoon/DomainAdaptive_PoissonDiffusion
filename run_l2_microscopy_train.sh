@@ -1,55 +1,55 @@
 #!/bin/bash
 
-# FIXED Microscopy Research Training Configuration
-# Follows the same phased approach as successful photography training
-# KEY FIX: Disabled mixed precision in Phase 1 to prevent NaN/Inf issues
+# L2 BASELINE Microscopy Training Configuration
+# Identical to Poisson-Gaussian except guidance type and 100K max steps
+# For fair comparison and ablation study
 
-echo "🔬 FIXED MICROSCOPY RESEARCH TRAINING CONFIGURATION v1.1"
-echo "========================================================"
+echo "🔬 L2 BASELINE MICROSCOPY TRAINING CONFIGURATION v1.0"
+echo "===================================================="
 echo ""
-echo "Strategy: Start stable (FP32), optimize incrementally (like photography)"
-echo "✅ FIXED: Disabled mixed precision in Phase 1 (key issue identified)"
-echo "✅ FIXED: Conservative learning rates in phases"
-echo "✅ OPTIMIZED: Single-channel grayscale processing for microscopy"
+echo "Strategy: Identical to Poisson-Gaussian training except guidance type"
+echo "✅ BASELINE: L2 (MSE) guidance instead of Poisson-Gaussian"
+echo "✅ TRAINING: 100K max steps for fair comparison"
+echo "✅ CONFIG: All other hyperparameters identical to main method"
 echo ""
 
 # Kill existing sessions
-tmux kill-session -t microscopy_research_training 2>/dev/null
+tmux kill-session -t l2_microscopy_training 2>/dev/null
 
 # Create new session
-tmux new-session -d -s microscopy_research_training -c /home/jilab/Jae
+tmux new-session -d -s l2_microscopy_training -c /home/jilab/Jae
 
-# Phase detection - check if we have a stable checkpoint (LIKE PHOTOGRAPHY)
+# Phase detection - check if we have a stable checkpoint (SAME AS POISSON)
 STABLE_CHECKPOINT=""
-if [ -f "results/microscopy_stable_checkpoint.pth" ]; then
-    STABLE_CHECKPOINT="--resume_checkpoint results/microscopy_stable_checkpoint.pth"
+if [ -f "results/l2_microscopy_stable_checkpoint.pth" ]; then
+    STABLE_CHECKPOINT="--resume_checkpoint results/l2_microscopy_stable_checkpoint.pth"
     MIXED_PRECISION="true"   # Enable mixed precision in phase 2
     LEARNING_RATE="2.5e-5"   # Higher learning rate in phase 2
     echo "📊 Phase 2: Stable checkpoint found, enabling optimizations"
 else
-    MIXED_PRECISION="false"  # DISABLE mixed precision in phase 1 (KEY FIX)
+    MIXED_PRECISION="false"  # DISABLE mixed precision in phase 1 (SAME FIX)
     LEARNING_RATE="5e-5"     # Conservative learning rate in phase 1
     echo "📊 Phase 1: Initial training, prioritizing stability (FP32 only)"
 fi
 
-# Data path - CORRECTED to use the proper microscopy dataset
+# Data path - SAME as Poisson-Gaussian
 REAL_DATA_PATH="/home/jilab/anna_OS_ML/PKL-DiffusionDenoising/data/preprocessed"
 if [ -d "$REAL_DATA_PATH" ] && [ "$(ls -A $REAL_DATA_PATH)" ]; then
     DATA_ROOT="$REAL_DATA_PATH"
-    echo "✅ Using CORRECT microscopy dataset: $DATA_ROOT"
+    echo "✅ Using SAME microscopy dataset: $DATA_ROOT"
 else
-    echo "❌ Correct dataset not found at: $REAL_DATA_PATH"
+    echo "❌ Dataset not found at: $REAL_DATA_PATH"
     DATA_ROOT="/tmp/dummy"
 fi
 
-# Main training command - MICROSCOPY OPTIMIZED with FIXED mixed precision
-tmux send-keys -t microscopy_research_training "
+# Main training command - L2 BASELINE with 100K max steps
+tmux send-keys -t l2_microscopy_training "
 cd /home/jilab/Jae && \\
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \\
 OMP_NUM_THREADS=8 \\
-python train_microscopy_model.py \\
+python train_l2_microscopy_model.py \\
     --data_root \"$DATA_ROOT\" \\
-    --max_steps 300000 \\
+    --max_steps 100000 \\
     --batch_size 4 \\
     --gradient_accumulation_steps 4 \\
     --model_channels 256 \\
@@ -57,7 +57,7 @@ python train_microscopy_model.py \\
     --channel_mult_emb 6 \\
     --num_blocks 6 \\
     --attn_resolutions 16 32 64 \\
-    --output_dir \"results/microscopy_research_steps_$(date +%Y%m%d_%H%M%S)\" \\
+    --output_dir \"results/l2_microscopy_baseline_$(date +%Y%m%d_%H%M%S)\" \\
     --device cuda \\
     --mixed_precision $MIXED_PRECISION \\
     --gradient_checkpointing false \\
@@ -76,10 +76,10 @@ python train_microscopy_model.py \\
     $STABLE_CHECKPOINT
 " Enter
 
-# Advanced monitoring in right pane - MICROSCOPY SPECIALIZED
-tmux split-window -h -t microscopy_research_training
+# Advanced monitoring in right pane - L2 BASELINE SPECIALIZED
+tmux split-window -h -t l2_microscopy_training
 
-tmux send-keys -t microscopy_research_training:0.1 "
+tmux send-keys -t l2_microscopy_training:0.1 "
 cd /home/jilab/Jae && python -c '
 import time
 import torch
@@ -88,39 +88,41 @@ import numpy as np
 from datetime import datetime
 import os
 
-print(\"🔬 FIXED MICROSCOPY RESEARCH TRAINING MONITOR - v1.1\")
+print(\"🔬 L2 BASELINE MICROSCOPY TRAINING MONITOR - v1.0\")
 print(\"=\" * 70)
 print(f\"Started: {datetime.now()}\")
 print(\"=\" * 70)
 print()
 
-# Configuration summary - MICROSCOPY SPECIFIC
+# Configuration summary - L2 BASELINE SPECIFIC
 configs = {
-    \"Model Size\": \"~400M parameters (optimized for microscopy)\",
+    \"Guidance Type\": \"L2 (MSE) Baseline\",
+    \"Model Size\": \"~400M parameters (identical to Poisson-Gaussian)\",
     \"Architecture\": \"256ch, 6 blocks, single-channel input (unified)\",
-    \"Training\": \"300K steps (step-based, unified)\",
+    \"Training\": \"100K steps (baseline comparison)\",
     \"Batch Strategy\": \"4 physical × 4 accumulation = 16 effective\",
-    \"Workers\": \"4 (optimized for stability)\",
-    \"Prefetch Factor\": \"2 (conservative for microscopy)\",
+    \"Workers\": \"4 (identical to Poisson-Gaussian)\",
+    \"Prefetch Factor\": \"2 (identical to Poisson-Gaussian)\",
 }
 
-print(\"📊 MICROSCOPY CONFIGURATION:\")
+print(\"📊 L2 BASELINE CONFIGURATION:\")
 for key, value in configs.items():
     print(f\"  {key:20}: {value}\")
 print()
 
-# Microscopy-specific optimizations
-print(\"🔬 FIXED MICROSCOPY OPTIMIZATIONS:\")
-print(\"  1. MIXED PRECISION: DISABLED in Phase 1 (key fix for NaN/Inf)\")
-print(\"  2. TRAINING LOSS: Poisson-Gaussian likelihood (physics-aware)\")
-print(\"  3. DATA LOADING: Conservative workers (stable for low-photon data)\")
-print(\"  4. DATASET: Single-channel grayscale microscopy data\")
-print(\"  5. MEMORY: Conservative settings (no gradient checkpointing)\")
-print(\"  6. PHASED APPROACH: FP32 → FP16 (like successful photography)\")
-print(\"  7. STABILITY: Ultra-conservative hyperparameters for precision\")
-print(\"  8. VALIDATION: Every 5K steps (frequent monitoring)\")
-print(\"  9. GRADIENT CLIPPING: 0.1 (more conservative than photography)\")
-print(\" 10. LEARNING RATE: 5e-5 → 2.5e-5 (phased like photography)\")
+# L2 baseline-specific optimizations
+print(\"🔬 L2 BASELINE OPTIMIZATIONS:\")
+print(\"  1. GUIDANCE: L2 (MSE) loss instead of Poisson-Gaussian\")
+print(\"  2. MIXED PRECISION: DISABLED in Phase 1 (same fix as Poisson)\")
+print(\"  3. DATA LOADING: Conservative workers (identical setup)\")
+print(\"  4. DATASET: Same single-channel grayscale microscopy data\")
+print(\"  5. MEMORY: Conservative settings (identical to Poisson)\")
+print(\"  6. PHASED APPROACH: FP32 → FP16 (same as Poisson)\")
+print(\"  7. STABILITY: Ultra-conservative hyperparameters (identical)\")
+print(\"  8. VALIDATION: Every 5K steps (identical monitoring)\")
+print(\"  9. GRADIENT CLIPPING: 0.1 (identical to Poisson)\")
+print(\" 10. LEARNING RATE: 5e-5 → 2.5e-5 (identical phasing)\")
+print(\" 11. MAX STEPS: 100K (reduced for baseline comparison)\")
 print(\"=\" * 70)
 print()
 
@@ -143,7 +145,7 @@ def get_training_speed():
     \"\"\"Estimate training speed from logs.\"\"\"
     try:
         log_dir = \"results/\"
-        latest = max([d for d in os.listdir(log_dir) if d.startswith(\"microscopy_research_\")], default=None)
+        latest = max([d for d in os.listdir(log_dir) if d.startswith(\"l2_microscopy_\")], default=None)
         if latest:
             log_file = os.path.join(log_dir, latest, \"training.log\")
             if os.path.exists(log_file):
@@ -189,9 +191,9 @@ while True:
 
             # Warnings - MICROSCOPY SPECIFIC
             if gpu_stats[\"percent\"] > 85:
-                print(\"  ⚠️  HIGH MEMORY - Risk of OOM for microscopy model!\")
+                print(\"  ⚠️  HIGH MEMORY - Risk of OOM for L2 baseline model!\")
             elif gpu_stats[\"percent\"] < 40:
-                print(\"  💡 LOW USAGE - Could increase batch size (microscopy allows smaller batches)\")
+                print(\"  💡 LOW USAGE - Could increase batch size (L2 baseline allows smaller batches)\")
 
         # CPU monitoring
         cpu_percent = psutil.cpu_percent(interval=1, percpu=True)
@@ -206,23 +208,23 @@ while True:
         ram = psutil.virtual_memory()
         print(f\"  RAM Usage   : {ram.percent:.1f}% ({ram.used/1e9:.1f} / {ram.total/1e9:.1f} GB)\")
 
-        # Data loading assessment - MICROSCOPY SPECIFIC
+        # Data loading assessment - L2 BASELINE SPECIFIC
         if avg_cpu > 70:
-            print(\"  ⚠️  HIGH CPU - Microscopy data loading might be bottleneck\")
+            print(\"  ⚠️  HIGH CPU - L2 baseline data loading might be bottleneck\")
 
         # Training speed
         speed = get_training_speed()
         print(f\"\\n⏱️  TRAINING SPEED: {speed}\")
 
-        # Microscopy-specific research metrics
-        print(f\"\\n🔬 MICROSCOPY RESEARCH NOTES:\")
+        # L2 baseline-specific research metrics
+        print(f\"\\n🔬 L2 BASELINE RESEARCH NOTES:\")
         if iteration < 10:
-            print(\"  Phase: Warmup (monitoring stability for low-photon data)\")
+            print(\"  Phase: Warmup (monitoring L2 baseline stability)\")
         elif gpu_stats and gpu_stats[\"percent\"] < 60:
-            print(\"  💡 Consider: Increasing batch size (microscopy uses batch size 4)\")
+            print(\"  💡 Consider: Increasing batch size (L2 baseline uses batch size 4)\")
 
         # Check current mixed precision status
-        phase_file = \"results/microscopy_stable_checkpoint.pth\"
+        phase_file = \"results/l2_microscopy_stable_checkpoint.pth\"
         if os.path.exists(phase_file):
             print(\"  Mixed Precision: ENABLED (Phase 2 - stable checkpoint found)\")
             print(\"  Learning Rate: 2.5e-5 (optimized for phase 2)\")
@@ -230,9 +232,11 @@ while True:
             print(\"  Mixed Precision: DISABLED (Phase 1 - stability mode, FP32 only)\")
             print(\"  Learning Rate: 5e-5 (conservative for phase 1)\")
 
+        print(\"  Guidance Type: L2 (MSE) Baseline\")
         print(\"  Data Type: Single-channel microscopy (grayscale)\")
-        print(\"  Optimization: Conservative settings for research validity\")
-        print(\"  Fix Applied: Disabled mixed precision to prevent NaN/Inf\")
+        print(\"  Optimization: Conservative settings for fair comparison\")
+        print(\"  Max Steps: 100K (baseline comparison vs 300K Poisson)\")
+        print(\"  Purpose: Ablation study to validate Poisson-Gaussian effectiveness\")
 
         print(\"=\" * 70)
 
@@ -248,39 +252,42 @@ while True:
 " Enter
 
 echo ""
-echo "✅ Fixed microscopy research training created!"
+echo "✅ L2 baseline microscopy training created!"
 echo ""
-echo "📊 FIXED MICROSCOPY TRAINING STRATEGY:"
+echo "📊 L2 BASELINE TRAINING STRATEGY:"
 echo ""
 echo "Phase 1 (Stability First - FP32 Only):"
-echo "  • Mixed Precision: OFF (KEY FIX - prevents NaN/Inf)"
-echo "  • Learning Rate: 5e-5 (conservative)"
-echo "  • Loss: Poisson-Gaussian (physics-aware)"
+echo "  • Guidance: L2 (MSE) instead of Poisson-Gaussian"
+echo "  • Mixed Precision: OFF (same fix as Poisson)"
+echo "  • Learning Rate: 5e-5 (identical to Poisson)"
 echo "  • Duration: Step-based training (until stable checkpoint)"
 echo ""
 echo "Phase 2 (Speed Optimization) - After stable checkpoint:"
-echo "  • Mixed Precision: ON (safe to enable after stability)"
-echo "  • Learning Rate: 2.5e-5 (optimized)"
-echo "  • Loss: Poisson-Gaussian (physics-aware)"
+echo "  • Guidance: L2 (MSE) instead of Poisson-Gaussian"
+echo "  • Mixed Precision: ON (same as Poisson)"
+echo "  • Learning Rate: 2.5e-5 (identical to Poisson)"
 echo "  • Duration: Step-based training"
 echo ""
-echo "🔧 KEY FIX APPLIED:"
-echo "  ✅ Mixed precision DISABLED in Phase 1 (like successful photography)"
-echo "  ✅ Phased approach: FP32 → FP16 (proven strategy)"
-echo "  ✅ Conservative learning rates: 5e-5 → 2.5e-5"
-echo "  ✅ Same pattern as successful photography training"
+echo "🔧 IDENTICAL CONFIGURATION (except guidance):"
+echo "  ✅ Same model architecture (256ch, 6 blocks)"
+echo "  ✅ Same batch strategy (4 × 4 = 16 effective)"
+echo "  ✅ Same learning rate schedule (5e-5 → 2.5e-5)"
+echo "  ✅ Same mixed precision phasing (FP32 → FP16)"
+echo "  ✅ Same data loading (4 workers, prefetch 2)"
+echo "  ✅ Same validation frequency (every 5K steps)"
+echo "  ✅ Same gradient clipping (0.1)"
+echo "  ✅ Same seed (42) for reproducibility"
 echo ""
-echo "🔬 MICROSCOPY RESEARCH VALIDITY:"
-echo "  ✅ Poisson-Gaussian likelihood (physics-aware, research valid)"
-echo "  ✅ Single-channel grayscale processing (microscopy standard)"
-echo "  ✅ Conservative hyperparameters (precision over speed)"
-echo "  ✅ Lower photon regime optimization (scale=1000.0 vs 10000.0)"
-echo "  ✅ More training steps (300K for thoroughness)"
-echo "  ✅ Exact likelihood for validation (accurate metrics)"
-echo "  ✅ Physical consistency maintained"
-echo "  ✅ Comparable to published microscopy baselines"
+echo "🔬 L2 BASELINE RESEARCH VALIDITY:"
+echo "  ✅ L2 (MSE) guidance for standard deep learning comparison"
+echo "  ✅ Same single-channel grayscale processing"
+echo "  ✅ Same conservative hyperparameters"
+echo "  ✅ Same dataset and preprocessing"
+echo "  ✅ 100K steps for efficient baseline comparison"
+echo "  ✅ Perfect ablation study setup"
+echo "  ✅ Validates Poisson-Gaussian effectiveness"
 echo ""
-echo "🚀 MICROSCOPY OPTIMIZATIONS:"
+echo "🚀 BASELINE OPTIMIZATIONS (identical to Poisson):"
 echo "  • 4 workers (stable for microscopy data loading)"
 echo "  • Conservative prefetching (2 vs 4 for photography)"
 echo "  • Lower gradient clipping (0.1 vs 0.5 for photography)"
@@ -289,10 +296,9 @@ echo "  • Unified model size (256 channels, same as all domains)"
 echo "  • No gradient checkpointing (stability over memory savings)"
 echo "  • FP32 precision initially (prevents numerical issues)"
 echo ""
-echo "To monitor: tmux attach -t microscopy_research_training"
+echo "To monitor: tmux attach -t l2_microscopy_training"
 echo ""
-echo "📝 Citations:"
-echo "  Foi et al. 'Practical Poisson-Gaussian noise modeling' (2008)"
-echo "  Mäkitalo & Foi 'Optimal inversion of the Anscombe transformation' (2013)"
-echo "  Karras et al. 'Elucidating the Design Space of Diffusion-Based Models' (2022)"
-echo "  Specialized for low-photon microscopy imaging applications"
+echo "📝 L2 Baseline Citations:"
+echo "  Standard MSE loss for deep learning comparison"
+echo "  Identical setup to Poisson-Gaussian except guidance type"
+echo "  Perfect ablation study for validating physics-aware approach"

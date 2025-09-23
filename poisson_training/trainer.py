@@ -49,6 +49,118 @@ from poisson_training.utils import (
 logger = get_logger(__name__)
 
 
+class MSELossWrapper(nn.Module):
+    """Wrapper for MSE loss to work with training system's (outputs, batch) format."""
+
+    def __init__(self):
+        super().__init__()
+        self.mse_loss = nn.MSELoss()
+
+    def forward(
+        self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute MSE loss between prediction and target.
+        For fair comparison with Poisson-Gaussian loss, we convert prediction back to electrons
+        and compare with target in electrons (same as Poisson-Gaussian loss).
+
+        Args:
+            outputs: Dictionary containing 'prediction' tensor (normalized [0,1])
+            batch: Dictionary containing 'electrons' tensor (target in electrons)
+
+        Returns:
+            Dictionary with 'total_loss' key
+        """
+        prediction = outputs["prediction"]  # Normalized [0,1]
+        target = batch["electrons"]  # In electrons
+        scale = batch.get("scale", torch.tensor(1000.0, device=prediction.device))
+        background = batch.get(
+            "background", torch.tensor(0.0, device=prediction.device)
+        )
+
+        # Convert prediction back to electrons (same as Poisson-Gaussian loss)
+        # Ensure proper broadcasting
+        if scale.numel() > 1:
+            scale = scale.view(-1, 1, 1, 1)
+        if background.numel() > 1:
+            background = background.view(-1, 1, 1, 1)
+
+        pred_electrons = prediction * scale + background
+
+        # Debug: Log tensor statistics on first few batches
+        if hasattr(self, "_debug_count"):
+            self._debug_count += 1
+        else:
+            self._debug_count = 1
+
+        if self._debug_count <= 3:  # Log first 3 batches
+            logger = get_logger(__name__)
+            logger.info(f"MSE Loss Debug - Batch {self._debug_count}:")
+            logger.info(
+                f"  Prediction (norm): shape={prediction.shape}, min={prediction.min().item():.6f}, max={prediction.max().item():.6f}, mean={prediction.mean().item():.6f}"
+            )
+            logger.info(
+                f"  Prediction (elec): min={pred_electrons.min().item():.1f}, max={pred_electrons.max().item():.1f}, mean={pred_electrons.mean().item():.1f}"
+            )
+            logger.info(
+                f"  Target (elec):     shape={target.shape}, min={target.min().item():.1f}, max={target.max().item():.1f}, mean={target.mean().item():.1f}"
+            )
+            logger.info(
+                f"  Scale: {scale.mean().item():.1f}, Background: {background.mean().item():.1f}"
+            )
+
+        # Compute MSE loss in electron space (fair comparison with Poisson-Gaussian)
+        loss = self.mse_loss(pred_electrons, target)
+
+        if self._debug_count <= 3:
+            logger.info(f"  MSE Loss:   {loss.item():.6f}")
+
+        return {"total_loss": loss}
+
+
+class L1LossWrapper(nn.Module):
+    """Wrapper for L1 loss to work with training system's (outputs, batch) format."""
+
+    def __init__(self):
+        super().__init__()
+        self.l1_loss = nn.L1Loss()
+
+    def forward(
+        self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute L1 loss between prediction and target.
+        For fair comparison with Poisson-Gaussian loss, we convert prediction back to electrons
+        and compare with target in electrons (same as Poisson-Gaussian loss).
+
+        Args:
+            outputs: Dictionary containing 'prediction' tensor (normalized [0,1])
+            batch: Dictionary containing 'electrons' tensor (target in electrons)
+
+        Returns:
+            Dictionary with 'total_loss' key
+        """
+        prediction = outputs["prediction"]  # Normalized [0,1]
+        target = batch["electrons"]  # In electrons
+        scale = batch.get("scale", torch.tensor(1000.0, device=prediction.device))
+        background = batch.get(
+            "background", torch.tensor(0.0, device=prediction.device)
+        )
+
+        # Convert prediction back to electrons (same as Poisson-Gaussian loss)
+        # Ensure proper broadcasting
+        if scale.numel() > 1:
+            scale = scale.view(-1, 1, 1, 1)
+        if background.numel() > 1:
+            background = background.view(-1, 1, 1, 1)
+
+        pred_electrons = prediction * scale + background
+
+        # Compute L1 loss in electron space (fair comparison with Poisson-Gaussian)
+        loss = self.l1_loss(pred_electrons, target)
+        return {"total_loss": loss}
+
+
 @dataclass
 class TrainingConfig:
     """Configuration for training loop."""
@@ -431,9 +543,9 @@ class DeterministicTrainer:
         if self.config.loss_type == "poisson_gaussian":
             return PoissonGaussianLoss(weights=self.config.loss_weights)
         elif self.config.loss_type == "mse":
-            return nn.MSELoss()
+            return MSELossWrapper()
         elif self.config.loss_type == "l1":
-            return nn.L1Loss()
+            return L1LossWrapper()
         else:
             return DiffusionLoss(loss_type=self.config.loss_type)
 
