@@ -199,6 +199,7 @@ class EDMPosteriorSampler:
         read_noise: Optional[Union[float, torch.Tensor]] = None,
         background: Optional[Union[float, torch.Tensor]] = None,
         condition: Optional[torch.Tensor] = None,
+        conditioning_type: str = "dapgd",
         x_init: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
         **kwargs,
@@ -213,6 +214,7 @@ class EDMPosteriorSampler:
             read_noise: Read noise parameter (if condition not provided)
             background: Background parameter (if condition not provided)
             condition: Pre-computed conditioning vector [B, 6]
+            conditioning_type: Type of conditioning ('dapgd' or 'l2')
             x_init: Initial sample (uses random if None)
             mask: Valid pixel mask [B, C, H, W]
             **kwargs: Additional arguments
@@ -233,6 +235,7 @@ class EDMPosteriorSampler:
                 read_noise=read_noise,
                 background=background,
                 device=y_observed.device,
+                conditioning_type=conditioning_type,
             )
 
         # Initialize sampling
@@ -273,29 +276,34 @@ class EDMPosteriorSampler:
                     x, sigma_curr, condition, y_observed, mask, i
                 )
 
-                # Compute derivative (score)
-                d = (x - x_denoised) / sigma_curr
-
                 # Apply guidance if in guidance range
                 if self._should_apply_guidance(i):
-                    guidance_grad = self.guidance.compute(
+                    # Compute guidance correction w.r.t x_denoised.
+                    # The `compute` method returns gamma * grad_log_p(y|x_denoised),
+                    # which is a correction in the normalized space.
+                    guidance_correction = self.guidance.compute(
                         x_denoised, y_observed, sigma_curr, mask=mask
                     )
 
                     # Scale guidance
-                    guidance_grad = guidance_grad * self.config.guidance_scale
+                    guidance_correction = (
+                        guidance_correction * self.config.guidance_scale
+                    )
 
-                    # Add to derivative
-                    d = d + guidance_grad
+                    # Apply guidance to the denoised prediction (DPS-style)
+                    x_denoised = x_denoised + guidance_correction
 
                     # Collect diagnostics
                     if self.config.collect_diagnostics:
                         self.diagnostics["guidance_norms"].append(
-                            torch.norm(guidance_grad).item()
+                            torch.norm(guidance_correction).item()
                         )
                 else:
                     if self.config.collect_diagnostics:
                         self.diagnostics["guidance_norms"].append(0.0)
+
+                # Compute derivative (score) using the (potentially guided) denoised prediction
+                d = (x - x_denoised) / sigma_curr
 
                 # Take sampling step
                 x = self._take_step(x, d, sigma_curr, sigma_next, i)
