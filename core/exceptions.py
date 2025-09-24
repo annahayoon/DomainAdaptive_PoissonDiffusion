@@ -119,3 +119,9 @@ class PerformanceError(PoissonDiffusionError):
     """Raised when performance operations fail."""
 
     pass
+
+
+class AnalysisError(PoissonDiffusionError):
+    """Raised when analysis operations fail."""
+
+    pass

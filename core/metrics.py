@@ -26,10 +26,375 @@ from skimage.metrics import peak_signal_noise_ratio as psnr_skimage
 from skimage.metrics import structural_similarity as ssim_skimage
 
 from .exceptions import AnalysisError
-from .residual_analysis import ResidualAnalyzer
 
 # Set up logging
 logger = logging.getLogger(__name__)
+
+
+class ResidualAnalyzer:
+    """Comprehensive residual analyzer for physics validation.
+
+    This class provides rigorous statistical validation of residuals to verify
+    that they follow expected Poisson-Gaussian statistics (N(0,1) when normalized).
+    """
+
+    def __init__(self, device: str = "cpu"):
+        """Initialize residual analyzer."""
+        self.device = device
+
+    def analyze_residuals(
+        self,
+        pred: torch.Tensor,
+        noisy: torch.Tensor,
+        scale: float,
+        background: float = 0.0,
+        read_noise: float = 0.0,
+        mask: Optional[torch.Tensor] = None,
+    ) -> Dict[str, Any]:
+        """
+        Comprehensive residual analysis for physics validation.
+
+        Args:
+            pred: Predicted clean image [B, C, H, W] (normalized [0,1])
+            noisy: Noisy observation [B, C, H, W] (electrons)
+            scale: Normalization scale (electrons)
+            background: Background offset (electrons)
+            read_noise: Read noise standard deviation (electrons)
+            mask: Valid pixel mask [B, C, H, W]
+
+        Returns:
+            Dictionary containing comprehensive residual statistics
+        """
+        # Convert prediction to electrons
+        pred_electrons = pred * scale + background
+
+        # Compute expected variance under Poisson-Gaussian model
+        expected_variance = torch.clamp(pred_electrons + read_noise**2, min=1e-10)
+
+        # Compute normalized residuals: (noisy - pred) / sqrt(pred + σ_r²)
+        residuals = noisy - pred_electrons
+        normalized_residuals = residuals / torch.sqrt(expected_variance)
+
+        # Apply mask if provided
+        if mask is not None:
+            normalized_residuals = normalized_residuals * mask
+            valid_pixels = mask.sum()
+            if valid_pixels == 0:
+                raise AnalysisError("No valid pixels for residual analysis")
+
+        # Flatten residuals for analysis
+        residuals_flat = normalized_residuals.flatten()
+        if mask is not None:
+            mask_flat = mask.flatten()
+            residuals_flat = residuals_flat[mask_flat > 0.5]
+
+        if len(residuals_flat) < 100:
+            raise AnalysisError(
+                f"Insufficient valid pixels for analysis: {len(residuals_flat)}"
+            )
+
+        # Convert to numpy for statistical tests
+        residuals_np = residuals_flat.detach().cpu().numpy()
+
+        # Perform comprehensive statistical analysis
+        results = self._perform_statistical_tests(
+            residuals_np, pred_electrons, expected_variance, mask
+        )
+
+        # Add basic statistics
+        results.update(
+            {
+                "mean": residuals_np.mean(),
+                "std_dev": residuals_np.std(),
+                "skewness": stats.skew(residuals_np),
+                "kurtosis": stats.kurtosis(residuals_np),
+                "n_samples": len(residuals_np),
+                "scale": scale,
+                "background": background,
+                "read_noise": read_noise,
+            }
+        )
+
+        return results
+
+    def _perform_statistical_tests(
+        self,
+        residuals_np: np.ndarray,
+        pred_electrons: torch.Tensor,
+        expected_variance: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> Dict[str, Any]:
+        """
+        Perform comprehensive statistical tests on normalized residuals.
+
+        Args:
+            residuals_np: Normalized residuals as numpy array
+            pred_electrons: Predicted electron counts
+            expected_variance: Expected variance under Poisson-Gaussian model
+            mask: Valid pixel mask
+
+        Returns:
+            Dictionary of statistical test results
+        """
+        results = {}
+
+        # 1. Kolmogorov-Smirnov test against N(0,1)
+        ks_stat, ks_pvalue = stats.kstest(residuals_np, "norm")
+        results.update(
+            {
+                "ks_statistic": ks_stat,
+                "ks_pvalue": ks_pvalue,
+                "gaussian_fit": ks_pvalue > 0.05,  # Accept normality at 5% level
+            }
+        )
+
+        # 2. Spatial correlation analysis
+        spatial_corr = self._compute_spatial_correlation(
+            residuals_np, pred_electrons.shape
+        )
+        results.update(spatial_corr)
+
+        # 3. Frequency domain analysis (power spectrum)
+        spectral_analysis = self._compute_spectral_analysis(
+            residuals_np, pred_electrons.shape
+        )
+        results.update(spectral_analysis)
+
+        # 4. Additional statistical tests
+        # Shapiro-Wilk test (more sensitive than KS for normality)
+        try:
+            shapiro_stat, shapiro_pvalue = stats.shapiro(
+                residuals_np[:5000]
+            )  # Limit for computation
+            results.update(
+                {
+                    "shapiro_statistic": shapiro_stat,
+                    "shapiro_pvalue": shapiro_pvalue,
+                    "normal_by_shapiro": shapiro_pvalue > 0.05,
+                }
+            )
+        except Exception:
+            results.update(
+                {
+                    "shapiro_statistic": float("nan"),
+                    "shapiro_pvalue": float("nan"),
+                    "normal_by_shapiro": False,
+                }
+            )
+
+        # 5. Anderson-Darling test (even more sensitive)
+        try:
+            ad_result = stats.anderson(residuals_np[:5000], dist="norm")
+            results.update(
+                {
+                    "anderson_statistic": ad_result.statistic,
+                    "anderson_critical_5": ad_result.critical_values[2],  # 5% level
+                    "anderson_significance_5": ad_result.significance_level[2],
+                    "normal_by_anderson": ad_result.statistic
+                    < ad_result.critical_values[2],
+                }
+            )
+        except Exception:
+            results.update(
+                {
+                    "anderson_statistic": float("nan"),
+                    "anderson_critical_5": float("nan"),
+                    "anderson_significance_5": float("nan"),
+                    "normal_by_anderson": False,
+                }
+            )
+
+        # 6. Ljung-Box test for autocorrelation
+        try:
+            lb_stat, lb_pvalue = stats.acorr_ljungbox(residuals_np, lags=[1, 5, 10])
+            results.update(
+                {
+                    "ljung_box_statistic": lb_stat.iloc[-1],  # Last lag
+                    "ljung_box_pvalue": lb_pvalue.iloc[-1],
+                    "white_noise_by_ljung_box": lb_pvalue.iloc[-1] > 0.05,
+                }
+            )
+        except Exception:
+            results.update(
+                {
+                    "ljung_box_statistic": float("nan"),
+                    "ljung_box_pvalue": float("nan"),
+                    "white_noise_by_ljung_box": False,
+                }
+            )
+
+        return results
+
+    def _compute_spatial_correlation(
+        self, residuals_np: np.ndarray, image_shape: torch.Size
+    ) -> Dict[str, Any]:
+        """
+        Compute spatial correlation of residuals.
+
+        Args:
+            residuals_np: Residuals as flattened numpy array
+            image_shape: Shape of the original image tensor
+
+        Returns:
+            Dictionary of spatial correlation metrics
+        """
+        try:
+            # Reshape to 2D for spatial analysis
+            h, w = image_shape[-2], image_shape[-1]
+            if len(residuals_np) < h * w:
+                # Pad if necessary (though this shouldn't happen with proper masking)
+                residuals_2d = np.zeros((h, w))
+                residuals_2d.flat[: len(residuals_np)] = residuals_np
+            else:
+                residuals_2d = residuals_np[: h * w].reshape(h, w)
+
+            # Compute autocorrelation at lag 1 in both directions
+            autocorr_x = np.corrcoef(
+                residuals_2d[:, :-1].flatten(), residuals_2d[:, 1:].flatten()
+            )[0, 1]
+            autocorr_y = np.corrcoef(
+                residuals_2d[:-1, :].flatten(), residuals_2d[1:, :].flatten()
+            )[0, 1]
+
+            # Compute autocorrelation matrix for first few lags
+            max_lag = min(5, min(h, w) // 2)
+            autocorr_matrix = np.zeros((max_lag, max_lag))
+
+            for i in range(max_lag):
+                for j in range(max_lag):
+                    if i == 0 and j == 0:
+                        autocorr_matrix[i, j] = 1.0
+                    else:
+                        shifted = np.roll(residuals_2d, (i, j), axis=(0, 1))
+                        mask = np.ones_like(residuals_2d)
+                        mask = np.roll(mask, (i, j), axis=(0, 1))
+
+                        # Only correlate where both pixels are valid
+                        valid_mask = mask == 1
+                        if valid_mask.sum() > 100:
+                            autocorr_matrix[i, j] = np.corrcoef(
+                                residuals_2d[valid_mask].flatten(),
+                                shifted[valid_mask].flatten(),
+                            )[0, 1]
+                        else:
+                            autocorr_matrix[i, j] = float("nan")
+
+            return {
+                "autocorrelation_lag1_x": autocorr_x,
+                "autocorrelation_lag1_y": autocorr_y,
+                "spatial_uncorrelated": abs(autocorr_x) < 0.1 and abs(autocorr_y) < 0.1,
+                "autocorrelation_matrix": autocorr_matrix,
+            }
+        except Exception as e:
+            logger.warning(f"Spatial correlation analysis failed: {e}")
+            return {
+                "autocorrelation_lag1_x": float("nan"),
+                "autocorrelation_lag1_y": float("nan"),
+                "spatial_uncorrelated": False,
+                "autocorrelation_matrix": None,
+            }
+
+    def _compute_spectral_analysis(
+        self, residuals_np: np.ndarray, image_shape: torch.Size
+    ) -> Dict[str, Any]:
+        """
+        Compute spectral analysis of residuals.
+
+        Args:
+            residuals_np: Residuals as flattened numpy array
+            image_shape: Shape of the original image tensor
+
+        Returns:
+            Dictionary of spectral analysis metrics
+        """
+        try:
+            # Reshape to 2D for spectral analysis
+            h, w = image_shape[-2], image_shape[-1]
+            if len(residuals_np) < h * w:
+                residuals_2d = np.zeros((h, w))
+                residuals_2d.flat[: len(residuals_np)] = residuals_np
+            else:
+                residuals_2d = residuals_np[: h * w].reshape(h, w)
+
+            # Compute 2D power spectral density
+            # Use periodogram for each row and average
+            row_psds = []
+            for row in residuals_2d:
+                if np.std(row) > 1e-10:  # Skip rows with no variation
+                    freqs, psd = periodogram(
+                        row, fs=1.0
+                    )  # fs=1 since we're working in pixels
+                    row_psds.append(psd)
+
+            if not row_psds:
+                return {
+                    "spectral_flatness": float("nan"),
+                    "spectral_slope": float("nan"),
+                    "high_freq_power": float("nan"),
+                    "white_spectrum": False,
+                }
+
+            # Average PSD across rows
+            avg_psd = np.mean(row_psds, axis=0)
+
+            # Skip DC component for analysis
+            freqs = freqs[1:]
+            avg_psd = avg_psd[1:]
+
+            if len(avg_psd) < 10:
+                return {
+                    "spectral_flatness": float("nan"),
+                    "spectral_slope": float("nan"),
+                    "high_freq_power": float("nan"),
+                    "white_spectrum": False,
+                }
+
+            # Compute spectral flatness (Wiener entropy)
+            # White noise should have flat spectrum (value close to 1)
+            spectral_flatness = np.exp(np.mean(np.log(avg_psd + 1e-10))) / np.mean(
+                avg_psd
+            )
+
+            # Compute spectral slope (should be ~0 for white noise)
+            # Use log-log regression on frequencies > 0.1 * Nyquist
+            valid_idx = freqs > 0.1 * np.max(freqs)
+            if np.sum(valid_idx) > 5:
+                log_freqs = np.log(freqs[valid_idx])
+                log_psd = np.log(avg_psd[valid_idx] + 1e-10)
+                slope, _ = np.polyfit(log_freqs, log_psd, 1)
+            else:
+                slope = float("nan")
+
+            # Compute high-frequency power (should be significant for white noise)
+            high_freq_idx = freqs > 0.5 * np.max(freqs)
+            high_freq_power = (
+                np.mean(avg_psd[high_freq_idx]) if np.any(high_freq_idx) else 0.0
+            )
+
+            # White spectrum criteria
+            white_spectrum = (
+                spectral_flatness > 0.8
+                and abs(slope) < 0.5  # High flatness
+                and high_freq_power  # Small slope
+                > 0.1  # Significant high-frequency content
+            )
+
+            return {
+                "spectral_flatness": spectral_flatness,
+                "spectral_slope": slope,
+                "high_freq_power": high_freq_power,
+                "white_spectrum": white_spectrum,
+                "frequency_range": (freqs.min(), freqs.max()),
+            }
+        except Exception as e:
+            logger.warning(f"Spectral analysis failed: {e}")
+            return {
+                "spectral_flatness": float("nan"),
+                "spectral_slope": float("nan"),
+                "high_freq_power": float("nan"),
+                "white_spectrum": False,
+                "frequency_range": (float("nan"), float("nan")),
+            }
 
 
 @dataclass
@@ -1015,7 +1380,9 @@ class EvaluationSuite:
 
         # Perceptual metrics (calculated in normalized space as they expect [0,1] or [-1,1])
         lpips = self.standard_metrics.compute_lpips(pred, target, mask=mask)
-        ms_ssim = self.standard_metrics.compute_ms_ssim(pred, target, data_range=1.0, mask=mask)
+        ms_ssim = self.standard_metrics.compute_ms_ssim(
+            pred, target, data_range=1.0, mask=mask
+        )
 
         # Physics metrics (operates on mixed spaces, handles conversion internally)
         logger.debug("Computing physics metrics...")
@@ -1038,7 +1405,9 @@ class EvaluationSuite:
             }
             # The primary value for the distribution metric is the KS statistic,
             # which measures deviation from a perfect N(0,1). Lower is better.
-            residual_dist = MetricResult(value=dist_meta["ks_statistic"], metadata=dist_meta)
+            residual_dist = MetricResult(
+                value=dist_meta["ks_statistic"], metadata=dist_meta
+            )
 
             whiteness_meta = {
                 "spectral_flatness": residual_stats["whiteness_spectral_flatness"],
@@ -1311,10 +1680,18 @@ class EvaluationSuite:
                     "max": np.max(chi2_values) if chi2_values else float("nan"),
                 },
                 "residual_ks_stats": {
-                    "mean": np.mean(residual_ks_values) if residual_ks_values else float("nan"),
-                    "std": np.std(residual_ks_values) if residual_ks_values else float("nan"),
-                    "min": np.min(residual_ks_values) if residual_ks_values else float("nan"),
-                    "max": np.max(residual_ks_values) if residual_ks_values else float("nan"),
+                    "mean": np.mean(residual_ks_values)
+                    if residual_ks_values
+                    else float("nan"),
+                    "std": np.std(residual_ks_values)
+                    if residual_ks_values
+                    else float("nan"),
+                    "min": np.min(residual_ks_values)
+                    if residual_ks_values
+                    else float("nan"),
+                    "max": np.max(residual_ks_values)
+                    if residual_ks_values
+                    else float("nan"),
                 },
                 "avg_processing_time": np.mean(
                     [r.processing_time for r in group_reports]

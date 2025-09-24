@@ -1182,11 +1182,76 @@ class DeterministicTrainer:
 
             # Restore RNG states for reproducibility
             if self.config.deterministic:
-                torch.set_rng_state(checkpoint_data["rng_state"])
-                if checkpoint_data.get("cuda_rng_state") and torch.cuda.is_available():
-                    torch.cuda.set_rng_state(checkpoint_data["cuda_rng_state"])
-                np.random.set_state(checkpoint_data["numpy_rng_state"])
-                random.setstate(checkpoint_data["python_rng_state"])
+                try:
+                    # Handle CPU RNG state with type conversion if needed
+                    if "rng_state" in checkpoint_data:
+                        rng_state = checkpoint_data["rng_state"]
+                        if not isinstance(rng_state, torch.ByteTensor):
+                            logger.warning(
+                                f"Converting RNG state from {type(rng_state)} to ByteTensor"
+                            )
+                            if hasattr(torch, "ByteTensor"):
+                                rng_state = rng_state.to(torch.uint8)
+                            else:
+                                # For newer PyTorch versions
+                                rng_state = rng_state.to(dtype=torch.uint8)
+                        torch.set_rng_state(rng_state)
+                        logger.info("✅ CPU RNG state restored successfully")
+                    else:
+                        logger.warning(
+                            "⚠️ No CPU RNG state found in checkpoint, using current state"
+                        )
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to restore CPU RNG state: {e}")
+                    logger.warning(
+                        "Continuing with current RNG state (reproducibility may be affected)"
+                    )
+
+                try:
+                    # Handle CUDA RNG state with type conversion if needed
+                    if (
+                        checkpoint_data.get("cuda_rng_state")
+                        and torch.cuda.is_available()
+                    ):
+                        cuda_rng_state = checkpoint_data["cuda_rng_state"]
+                        if not isinstance(cuda_rng_state, torch.ByteTensor):
+                            logger.warning(
+                                f"Converting CUDA RNG state from {type(cuda_rng_state)} to ByteTensor"
+                            )
+                            if hasattr(torch, "ByteTensor"):
+                                cuda_rng_state = cuda_rng_state.to(torch.uint8)
+                            else:
+                                # For newer PyTorch versions
+                                cuda_rng_state = cuda_rng_state.to(dtype=torch.uint8)
+                        torch.cuda.set_rng_state(cuda_rng_state)
+                        logger.info("✅ CUDA RNG state restored successfully")
+                    else:
+                        logger.warning(
+                            "⚠️ No CUDA RNG state found in checkpoint or CUDA not available"
+                        )
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to restore CUDA RNG state: {e}")
+                    logger.warning(
+                        "Continuing with current CUDA RNG state (reproducibility may be affected)"
+                    )
+
+                try:
+                    if "numpy_rng_state" in checkpoint_data:
+                        np.random.set_state(checkpoint_data["numpy_rng_state"])
+                        logger.info("✅ NumPy RNG state restored successfully")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to restore NumPy RNG state: {e}")
+
+                try:
+                    if "python_rng_state" in checkpoint_data:
+                        random.setstate(checkpoint_data["python_rng_state"])
+                        logger.info("✅ Python RNG state restored successfully")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to restore Python RNG state: {e}")
+            else:
+                logger.info(
+                    "🎲 Deterministic mode disabled, skipping RNG state restoration"
+                )
 
         logger.info(f"Loaded checkpoint from {checkpoint_path}")
 

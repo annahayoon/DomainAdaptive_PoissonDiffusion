@@ -1031,12 +1031,58 @@ def load_pretrained_edm(
     Returns:
         Loaded EDMModelWrapper
     """
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
     # Extract configuration if not provided
     if config is None:
         if "config" in checkpoint:
-            config = EDMConfig(**checkpoint["config"])
+            # Filter out training-specific config parameters
+            model_config = {}
+            edm_config_keys = {
+                "img_resolution",
+                "img_channels",
+                "model_channels",
+                "channel_mult",
+                "channel_mult_emb",
+                "num_blocks",
+                "attn_resolutions",
+                "dropout",
+                "label_dim",
+                "use_fp16",
+                "preconditioner_type",
+                "sigma_min",
+                "sigma_max",
+                "sigma_data",
+            }
+
+            for key, value in checkpoint["config"].items():
+                if key in edm_config_keys:
+                    model_config[key] = value
+
+            # Add default values for missing keys
+            if "img_resolution" not in model_config:
+                model_config["img_resolution"] = 128
+            if "img_channels" not in model_config:
+                # Infer from model state dict if possible
+                if "model_state_dict" in checkpoint:
+                    # Check the input layer to determine channels
+                    for key in checkpoint["model_state_dict"].keys():
+                        if "128x128_conv.weight" in key and "enc" in key:
+                            weight_shape = checkpoint["model_state_dict"][key].shape
+                            model_config["img_channels"] = weight_shape[
+                                1
+                            ]  # Input channels
+                            break
+                    else:
+                        model_config["img_channels"] = 1  # Default fallback
+                else:
+                    model_config["img_channels"] = 1
+            if "label_dim" not in model_config:
+                model_config["label_dim"] = 6
+            if "model_channels" not in model_config:
+                model_config["model_channels"] = 320  # From checkpoint config
+
+            config = EDMConfig(**model_config)
         else:
             raise ValueError("No configuration found in checkpoint and none provided")
 
