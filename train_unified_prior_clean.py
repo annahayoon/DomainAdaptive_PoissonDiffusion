@@ -746,11 +746,11 @@ def main():
         args.mixed_precision = False
         logger.info("🛡️ Conservative mode enabled")
 
-    # Clear CUDA cache before starting
+    # Don't clear cache at start - it can cause fragmentation issues
+    # PyTorch's memory allocator works better when allowed to manage memory naturally
     if torch.cuda.is_available():
-        torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
-        logger.info("🧹 Cleared CUDA cache before training")
+        logger.info("📊 Reset CUDA memory statistics")
 
     # Initialize training manager
     logger.info("🌟 INITIALIZING PRIOR_CLEAN UNIFIED TRAINING")
@@ -1016,13 +1016,18 @@ def main():
                 if step % 100 == 0:
                     logger.info(f"Step {step:,}: Loss = {loss.item():.6f}")
                     
-                    # Periodic memory cleanup
-                    if step % 1000 == 0 and torch.cuda.is_available():
+                    # Periodic memory cleanup (only if severe fragmentation, skip early steps)
+                    if step > 1000 and step % 5000 == 0 and torch.cuda.is_available():  # Skip first 1000 steps
                         allocated_gb = torch.cuda.memory_allocated() / 1e9
                         reserved_gb = torch.cuda.memory_reserved() / 1e9
-                        if reserved_gb - allocated_gb > 2.0:  # More than 2GB fragmentation
+                        fragmentation_gb = reserved_gb - allocated_gb
+                        
+                        # Only clear if fragmentation is severe (>20GB) AND we're using too much memory
+                        if fragmentation_gb > 20.0 and reserved_gb > 70.0:  # Much more conservative
                             torch.cuda.empty_cache()
-                            logger.info(f"  🧹 Cleared cache: Allocated: {allocated_gb:.1f}GB, Reserved: {reserved_gb:.1f}GB")
+                            logger.info(f"  🧹 Cleared cache: Allocated: {allocated_gb:.1f}GB, Reserved: {reserved_gb:.1f}GB, Fragmentation: {fragmentation_gb:.1f}GB")
+                        elif step % 10000 == 0:  # Just log memory status occasionally
+                            logger.info(f"  📊 Memory: Allocated: {allocated_gb:.1f}GB, Reserved: {reserved_gb:.1f}GB, Fragmentation: {fragmentation_gb:.1f}GB")
 
                 # Validation every N steps
                 if (
