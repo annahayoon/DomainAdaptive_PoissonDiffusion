@@ -746,6 +746,12 @@ def main():
         args.mixed_precision = False
         logger.info("🛡️ Conservative mode enabled")
 
+    # Clear CUDA cache before starting
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        logger.info("🧹 Cleared CUDA cache before training")
+
     # Initialize training manager
     logger.info("🌟 INITIALIZING PRIOR_CLEAN UNIFIED TRAINING")
     logger.info("=" * 70)
@@ -871,7 +877,7 @@ def main():
         logger.info(f"✅ EMA model created with decay: {ema_decay}")
 
     # Mixed precision scaler
-    scaler = torch.cuda.amp.GradScaler() if config["mixed_precision"] else None
+    scaler = torch.amp.GradScaler('cuda') if config["mixed_precision"] else None
 
     # Resume from checkpoint if provided
     start_step = 0
@@ -1009,6 +1015,14 @@ def main():
                 # Logging
                 if step % 100 == 0:
                     logger.info(f"Step {step:,}: Loss = {loss.item():.6f}")
+                    
+                    # Periodic memory cleanup
+                    if step % 1000 == 0 and torch.cuda.is_available():
+                        allocated_gb = torch.cuda.memory_allocated() / 1e9
+                        reserved_gb = torch.cuda.memory_reserved() / 1e9
+                        if reserved_gb - allocated_gb > 2.0:  # More than 2GB fragmentation
+                            torch.cuda.empty_cache()
+                            logger.info(f"  🧹 Cleared cache: Allocated: {allocated_gb:.1f}GB, Reserved: {reserved_gb:.1f}GB")
 
                 # Validation every N steps
                 if (

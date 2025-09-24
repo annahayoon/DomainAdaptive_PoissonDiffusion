@@ -25,20 +25,31 @@ tmux new-session -d -s h100_prior_clean_training -c /opt/dlami/nvme/DomainAdapti
 MIXED_PRECISION_FLAG="true"
 PRECISION_MODE="bf16"
 LEARNING_RATE="1e-4"        # Higher rate for large batches
-BATCH_SIZE="4"              # Extra safe batch size for 1.6B model with BF16
-GRAD_ACCUM="16"             # Effective batch = 64
+BATCH_SIZE="2"              # Reduced batch size to prevent OOM with 1.6B model
+GRAD_ACCUM="32"             # Effective batch = 64 (maintained)
 MODEL_CHANNELS="320"        # Large model for H100
 NUM_BLOCKS="8"              # Deep model
 MAX_STEPS="450000"          # Optimized for faster completion (1.5-2 days)
 
-# Check for existing checkpoint
+# Check for existing checkpoint - look in the correct H100 training directory
 STABLE_CHECKPOINT=""
-if [ -f "results/prior_clean_training/checkpoints/latest.pth" ]; then
-    STABLE_CHECKPOINT="--resume_checkpoint results/prior_clean_training/checkpoints/latest.pth"
-    echo "📊 Resuming from existing checkpoint"
-elif [ -f "results/prior_clean_training/interrupted_checkpoint.pth" ]; then
-    STABLE_CHECKPOINT="--resume_checkpoint results/prior_clean_training/interrupted_checkpoint.pth"
-    echo "📊 Resuming from interrupted checkpoint"
+LATEST_CHECKPOINT=""
+
+# Find the most recent checkpoint in the H100 training directory
+if [ -d "results/prior_clean_h100_training" ]; then
+    LATEST_CHECKPOINT=$(ls -t results/prior_clean_h100_training/checkpoint_step_*.pth 2>/dev/null | head -1)
+    if [ -n "$LATEST_CHECKPOINT" ]; then
+        STABLE_CHECKPOINT="--resume_checkpoint $LATEST_CHECKPOINT"
+        echo "📊 Resuming from latest checkpoint: $(basename $LATEST_CHECKPOINT)"
+    else
+        # Check for best model if no step checkpoints
+        if [ -f "results/prior_clean_h100_training/best_model.pth" ]; then
+            STABLE_CHECKPOINT="--resume_checkpoint results/prior_clean_h100_training/best_model.pth"
+            echo "📊 Resuming from best model checkpoint"
+        else
+            echo "📊 Starting fresh training"
+        fi
+    fi
 else
     echo "📊 Starting fresh training"
 fi
@@ -54,13 +65,15 @@ echo "  H100 Features: BF16, TF32, Flash Attention, 80GB HBM3"
 echo "  Learning Rate: $LEARNING_RATE (optimized for large batches)"
 echo "  Mixed Precision: $MIXED_PRECISION_FLAG (BF16 on H100)"
 
-# H100-specific environment optimizations
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:512
+# H100-specific environment optimizations with better memory management
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.8"
 export CUDA_LAUNCH_BLOCKING=0
 export TORCH_CUDNN_V8_API_ENABLED=1
 export TORCH_CUDNN_ALLOW_TF32=1
 export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
 export OMP_NUM_THREADS=16
+# Clear cache before starting
+export PYTORCH_NO_CUDA_MEMORY_CACHING=0
 
 # Launch H100-optimized prior_clean training
 tmux send-keys -t h100_prior_clean_training "
