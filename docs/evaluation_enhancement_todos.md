@@ -27,24 +27,24 @@ This document outlines critical enhancements needed for the evaluation framework
 - [x] **1.1.1** Create unified guidance interface that handles space conversion
 - [x] **1.1.2** Ensure all guidance methods receive electron-space data
 - [x] **1.1.3** Ensure guidance returns normalized-space corrections
-- [ ] **1.1.4** Add validation tests for space conversion correctness
-- [ ] **1.1.5** Document space conversion protocol clearly
+- [x] **1.1.4** Add validation tests for space conversion correctness
+- [x] **1.1.5** Document space conversion protocol clearly
 
 **Implementation Template:**
 ```python
 def unified_guidance_step(x0_norm, noisy_norm, calibration, guidance_type):
     """Unified guidance with proper space handling."""
     scale = calibration['scale']
-    
+
     # Convert to electron space for physics
     x0_electrons = x0_norm * scale
     y_electrons = noisy_norm * scale
-    
+
     if guidance_type == "poisson":
         score_electrons = poisson_guidance(x0_electrons, y_electrons, calibration)
     else:  # L2
         score_electrons = l2_guidance(x0_electrons, y_electrons, calibration)
-    
+
     # Convert back to normalized space
     return score_electrons / scale
 ```
@@ -76,8 +76,8 @@ def unified_guidance_step(x0_norm, noisy_norm, calibration, guidance_type):
 - [x] **1.3.1** Audit all metric calculations for space consistency
 - [x] **1.3.2** Ensure chi-squared uses de-normalized predictions
 - [x] **1.3.3** Ensure PSNR/SSIM use appropriate data range
-- [ ] **1.3.4** Add unit tests for metric space handling
-- [ ] **1.3.5** Add runtime assertions for metric input validation
+- [x] **1.3.4** Add unit tests for metric space handling
+- [x] **1.3.5** Add runtime assertions for metric input validation
 
 ---
 
@@ -103,7 +103,7 @@ class ResidualAnalyzer:
         variance = pred_electrons + read_noise**2
         residuals = (noisy_electrons - pred_electrons) / torch.sqrt(variance)
         return residuals  # Should be ~ N(0,1) for correct physics
-    
+
     def test_whiteness(self, residuals):
         """Test if residuals are white noise."""
         # Autocorrelation test
@@ -120,11 +120,11 @@ class ResidualAnalyzer:
 - `scripts/generate_paper_figures.py`
 
 **Tasks:**
-- [ ] **2.2.1** Implement 4-panel layout: [Our Result, L2 Result, Our Residuals, L2 Residuals]
-- [ ] **2.2.2** Add consistent colormap and intensity scaling
-- [ ] **2.2.3** Add statistical annotations (chi-squared values, whiteness scores)
-- [ ] **2.2.4** Generate figures for all three domains
-- [ ] **2.2.5** Create publication-quality output (300 DPI, proper fonts)
+- [x] **2.2.1** Implement 4-panel layout: [Our Result, L2 Result, Our Residuals, L2 Residuals]
+- [x] **2.2.2** Add consistent colormap and intensity scaling
+- [x] **2.2.3** Add statistical annotations (chi-squared values, whiteness scores)
+- [x] **2.2.4** Generate figures for all three domains
+- [x] **2.2.5** Create publication-quality output (300 DPI, proper fonts)
 
 ### 2.3 Statistical Residual Validation 🔥
 **Purpose**: Quantitative proof our residuals follow expected statistics
@@ -173,7 +173,7 @@ class ResidualAnalyzer:
 def analyze_photon_scaling(results_dict):
     """Analyze how performance scales with photon count."""
     photon_ranges = [(0, 10), (10, 50), (50, 100), (100, 500), (500, float('inf'))]
-    
+
     for method in ['DAPGD', 'L2-Baseline']:
         for photon_range in photon_ranges:
             # Filter results by photon count
