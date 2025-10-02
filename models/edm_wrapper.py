@@ -56,7 +56,7 @@ class EDMConfig:
     """Configuration for EDM model parameters."""
 
     # Image parameters
-    img_resolution: int = 128
+    img_resolution: int = 256
     img_channels: int = 1
 
     # Model architecture - Scaled up for research-level performance
@@ -82,11 +82,11 @@ class EDMConfig:
     def __post_init__(self):
         """Set default values for list parameters - Enhanced for research-level capacity."""
         if self.channel_mult is None:
-            # More aggressive channel scaling for better feature representation
-            self.channel_mult = [1, 2, 3, 4]
+            # Simplified channel scaling: 256→128→64→32 (3 downsampling steps)
+            self.channel_mult = [1, 2, 4]
         if self.attn_resolutions is None:
-            # Multi-scale attention optimized for patch-based processing
-            self.attn_resolutions = [16, 32, 64]
+            # No self-attention layers - pure convolutional U-Net
+            self.attn_resolutions = []
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for EDM model creation."""

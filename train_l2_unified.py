@@ -622,7 +622,7 @@ def main():
     parser.add_argument("--conservative", action="store_true", help="Use conservative settings")
     
     # Output arguments
-    parser.add_argument("--output_dir", type=str, default="results/l2_unified_training")
+    parser.add_argument("--output_dir", type=str, default="results/l2_unified_h100_small")
     parser.add_argument("--resume_checkpoint", type=str, default=None)
     
     # Performance arguments
@@ -742,25 +742,108 @@ def main():
             param.requires_grad = False
         logger.info(f"✅ EMA model created with decay: {ema_decay}")
 
+    # Learning rate scheduler
+    scheduler = None
+    lr_scheduler_type = config.get("lr_scheduler", "cosine")
+    warmup_steps = config.get("warmup_steps", 20000)
+
+    if lr_scheduler_type == "cosine":
+        # Cosine annealing with warmup
+        from torch.optim.lr_scheduler import CosineAnnealingLR
+
+        # First create a warmup scheduler
+        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=1e-6,  # Start from very low LR
+            end_factor=1.0,
+            total_iters=warmup_steps
+        )
+
+        # Then cosine annealing for the rest
+        remaining_steps = config["max_steps"] - warmup_steps
+        if remaining_steps > 0:
+            cosine_scheduler = CosineAnnealingLR(
+                optimizer,
+                T_max=remaining_steps,
+                eta_min=config["learning_rate"] * 1e-3  # Minimum LR is 0.1% of original
+            )
+            scheduler = torch.optim.lr_scheduler.SequentialLR(
+                optimizer,
+                schedulers=[warmup_scheduler, cosine_scheduler],
+                milestones=[warmup_steps]
+            )
+            logger.info(f"✅ Cosine scheduler with warmup: {warmup_steps} steps warmup, then cosine annealing")
+        else:
+            scheduler = warmup_scheduler
+            logger.info(f"✅ Warmup-only scheduler: {warmup_steps} steps warmup")
+    elif lr_scheduler_type == "step":
+        # Step decay scheduler
+        from torch.optim.lr_scheduler import StepLR
+        scheduler = StepLR(
+            optimizer,
+            step_size=config.get("step_size", 50000),
+            gamma=config.get("step_gamma", 0.5)
+        )
+        logger.info(f"✅ Step scheduler: decay every {config.get('step_size', 50000)} steps by {config.get('step_gamma', 0.5)}")
+    elif lr_scheduler_type == "exponential":
+        # Exponential decay scheduler
+        from torch.optim.lr_scheduler import ExponentialLR
+        scheduler = ExponentialLR(
+            optimizer,
+            gamma=config.get("exp_gamma", 0.999)
+        )
+        logger.info(f"✅ Exponential scheduler: decay by {config.get('exp_gamma', 0.999)} per step")
+    else:
+        logger.info(f"✅ No scheduler (constant LR): {config['learning_rate']}")
+
     # Mixed precision scaler
     scaler = torch.amp.GradScaler('cuda') if config["mixed_precision"] else None
 
-    # Resume from checkpoint if provided
+    # Resume from checkpoint if provided or auto-detect latest
     start_step = 0
-    if args.resume_checkpoint:
-        logger.info(f"🔄 Loading checkpoint: {args.resume_checkpoint}")
-        checkpoint = torch.load(args.resume_checkpoint, map_location=training_manager.device)
+    resume_checkpoint_path = args.resume_checkpoint
+
+    # Auto-detect latest checkpoint if none specified
+    if not resume_checkpoint_path:
+        output_dir = Path(args.output_dir) if args.output_dir else Path("results/l2_unified_h100_small")
+
+        # Look for the most recent L2 step checkpoint
+        checkpoint_files = list(output_dir.glob("l2_checkpoint_step_*.pth"))
+        checkpoint_files.extend(list(output_dir.glob("checkpoints/l2_checkpoint_step_*.pth")))
+
+        if checkpoint_files:
+            # Sort by step number and get the latest
+            def get_step_num(path):
+                filename = path.name
+                if filename.startswith("l2_checkpoint_step_") and filename.endswith(".pth"):
+                    try:
+                        return int(filename.split("_")[3].split(".")[0])  # l2_checkpoint_step_XXXXXX.pth
+                    except (IndexError, ValueError):
+                        return 0
+                return 0
+
+            checkpoint_files.sort(key=get_step_num, reverse=True)
+            resume_checkpoint_path = checkpoint_files[0]
+            logger.info(f"🔍 Auto-detected latest checkpoint: {resume_checkpoint_path}")
+        elif (output_dir / "l2_best_model.pth").exists():
+            resume_checkpoint_path = output_dir / "l2_best_model.pth"
+            logger.info(f"🔍 Auto-detected L2 best model checkpoint: {resume_checkpoint_path}")
+
+    # Resume from checkpoint if found
+    if resume_checkpoint_path:
+        logger.info(f"🔄 Loading checkpoint: {resume_checkpoint_path}")
+        checkpoint = torch.load(resume_checkpoint_path, map_location=training_manager.device)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_step = checkpoint['step']
-        
+
         # Load EMA model if available
         if ema_model is not None and 'ema_model_state_dict' in checkpoint:
             ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
             logger.info("✅ EMA model state loaded")
-        
+
         logger.info(f"✅ Resumed from step {start_step:,}")
-        
+
         # Load best validation loss if available
         if 'val_loss' in checkpoint:
             best_val_loss = checkpoint['val_loss']
@@ -769,6 +852,7 @@ def main():
             best_val_loss = float('inf')
     else:
         best_val_loss = float('inf')
+        logger.info("📊 Starting fresh training (no checkpoint found)")
 
     # Best model tracking
     step = start_step
@@ -823,7 +907,11 @@ def main():
                 else:
                     loss.backward()
                     optimizer.step()
-                
+
+                # Step the learning rate scheduler
+                if scheduler is not None:
+                    scheduler.step()
+
                 optimizer.zero_grad()
                 
                 # Update EMA model
@@ -841,8 +929,11 @@ def main():
                     clean_std = clean.std().item()
                     noisy_mean = noisy.mean().item()
                     pred_mean = predicted.mean().item()
-                    
-                    logger.info(f"L2 Baseline Step {step:,}: Loss = {loss.item():.6f}")
+
+                    # Current learning rate
+                    current_lr = optimizer.param_groups[0]['lr']
+
+                    logger.info(f"L2 Baseline Step {step:,}: Loss = {loss.item():.6f}, LR = {current_lr:.2e}")
                     logger.info(f"  Debug - Noise σ: {noise_mean:.4f}±{noise_std:.4f}, Clean: {clean_mean:.4f}±{clean_std:.4f}")
                     logger.info(f"  Debug - Noisy: {noisy_mean:.4f}, Predicted: {pred_mean:.4f}")
 

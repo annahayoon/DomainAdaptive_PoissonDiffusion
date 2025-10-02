@@ -8,7 +8,7 @@ Demonstrates domain-specific physics-based calibration methods
 import json
 import logging
 import os
-import pickle  # nosec B403 - Used for legitimate data serialization
+import pickle
 import sys
 import traceback
 from datetime import datetime
@@ -947,9 +947,7 @@ class SimpleTilesPipeline:
         import random
 
         # Create deterministic seed from scene_id for consistent assignment within scene
-        seed = int(
-            hashlib.md5(scene_id.encode(), usedforsecurity=False).hexdigest(), 16
-        ) % (2**32)
+        seed = int(hashlib.md5(scene_id.encode()).hexdigest(), 16) % (2**32)
         random.seed(seed)
 
         # Random assignment with proper distribution
