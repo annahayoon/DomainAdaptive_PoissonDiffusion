@@ -974,7 +974,7 @@ def main():
         "--learning_rate", type=float, default=1e-4, help="Learning rate"
     )
     parser.add_argument(
-        "--target_size", type=int, default=128, help="Target image size"
+        "--target_size", type=int, default=256, help="Target image size"
     )
     parser.add_argument(
         "--lr_scheduler",
@@ -1497,21 +1497,52 @@ def main():
             logger.error(f"   Output directory: {synthetic_config.output_dir}")
             raise SystemExit("Synthetic dataset creation failed")
     else:
-        # Use real preprocessed data
-        logger.info("📁 Loading real preprocessed photography data...")
-        from data.preprocessed_datasets import create_preprocessed_datasets
-        from utils.training_config import (
-            calculate_optimal_training_config,
-            print_training_analysis,
-        )
+        # Use real PNG data
+        logger.info("📁 Loading real PNG photography data...")
+        
+        png_path = Path(args.data_root)
+        
+        # Check for PNG files
+        if any(png_path.rglob("*.png")) or any(png_path.rglob("*.PNG")):
+            logger.info("🖼️  Using PNG data format (8-bit images)")
+            from data.png_dataset import create_png_datasets
+            
+            try:
+                train_dataset, val_dataset = create_png_datasets(
+                    data_root=png_path,
+                    domain="photography",
+                    max_files=args.max_files,
+                    seed=args.seed,
+                    image_size=args.target_size,
+                    channels=4,  # RGBA for photography
+                )
+            except Exception as e:
+                logger.error(f"❌ Failed to load PNG data: {e}")
+                logger.error(f"   PNG path: {png_path}")
+                raise SystemExit(f"PNG data loading failed: {e}")
+        else:
+            logger.error("❌ No PNG files found!")
+            logger.error(f"   Checked PNG path: {png_path}")
+            logger.error("   Please ensure PNG images are available in the data directory")
+            logger.error("   Supported formats: .png, .PNG")
+            raise SystemExit("No PNG files found")
 
+        # Calculate optimal training configuration (for both formats)
         try:
-            train_dataset, val_dataset = create_preprocessed_datasets(
-                data_root=args.data_root,
-                domain="photography",
-                max_files=args.max_files,
-                seed=args.seed,
+            from utils.training_config import (
+                calculate_optimal_training_config,
+                print_training_analysis,
             )
+            
+            dataset_size = len(train_dataset)
+            optimal_config = calculate_optimal_training_config(
+                dataset_size, args.batch_size
+            )
+
+            logger.info("🎯 AUTOMATIC TRAINING CONFIGURATION:")
+            print_training_analysis(optimal_config)
+        except ImportError:
+            logger.warning("⚠️  Training config utilities not available, using defaults")
         except Exception as e:
             logger.error(f"❌ Failed to load real preprocessed data: {e}")
             logger.error(f"   Expected data directory: {args.data_root}")

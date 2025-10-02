@@ -25,39 +25,53 @@ tmux kill-session -t h100_l2_unified_training 2>/dev/null
 # Create new session
 tmux new-session -d -s h100_l2_unified_training -c /opt/dlami/nvme/DomainAdaptive_PoissonDiffusion
 
-# H100-optimized configuration for L2 ablation study (IDENTICAL to Poisson-Gaussian)
+# H100-optimized configuration for L2 ablation study - SMALLER FASTER MODEL
 MIXED_PRECISION_FLAG="true"
 PRECISION_MODE="bf16"
-LEARNING_RATE="1e-4"        # IDENTICAL to Poisson-Gaussian
-BATCH_SIZE="4"              # IDENTICAL: Extra safe batch size for 1.6B model with BF16
-GRAD_ACCUM="16"             # IDENTICAL: Effective batch = 64
-MODEL_CHANNELS="320"        # IDENTICAL: Large model for H100
-NUM_BLOCKS="8"              # IDENTICAL: Deep model
-MAX_STEPS="225000"          # REDUCED: Half the steps for faster ablation study
+LEARNING_RATE="2e-4"        # Higher rate for larger physical batches
+BATCH_SIZE="8"              # 4× larger batch with smaller model (~400M params)
+GRAD_ACCUM="8"              # Effective batch = 64 (maintained)
+MODEL_CHANNELS="256"        # Optimal size for 128×128 (proven by EDM research)
+NUM_BLOCKS="6"              # Sufficient depth for this resolution
+CHANNEL_MULT_EMB="4"        # Reduced from 8 to match smaller model
+MAX_STEPS="1000000"         # Train up to 1M steps (will plateau naturally)
+OUTPUT_DIR="results/l2_unified_h100_small"  # NEW directory for L2 smaller model
 
-# Check for existing checkpoint
+# Check for existing checkpoint in NEW directory for smaller model
 STABLE_CHECKPOINT=""
-if [ -f "results/l2_unified_h100_training/l2_best_model.pth" ]; then
-    STABLE_CHECKPOINT="--resume_checkpoint results/l2_unified_h100_training/l2_best_model.pth"
-    echo "📊 Resuming from existing L2 checkpoint"
-elif [ -f "results/l2_unified_h100_training/l2_interrupted_checkpoint.pth" ]; then
-    STABLE_CHECKPOINT="--resume_checkpoint results/l2_unified_h100_training/l2_interrupted_checkpoint.pth"
-    echo "📊 Resuming from interrupted L2 checkpoint"
+LATEST_CHECKPOINT=""
+
+# Find the most recent checkpoint in the NEW L2 smaller model directory
+if [ -d "$OUTPUT_DIR" ]; then
+    LATEST_CHECKPOINT=$(ls -t $OUTPUT_DIR/l2_checkpoint_step_*.pth 2>/dev/null | head -1)
+    if [ -n "$LATEST_CHECKPOINT" ]; then
+        STABLE_CHECKPOINT="--resume_checkpoint $LATEST_CHECKPOINT"
+        echo "📊 Resuming from latest L2 checkpoint: $(basename $LATEST_CHECKPOINT)"
+    else
+        # Check for best model if no step checkpoints
+        if [ -f "$OUTPUT_DIR/l2_best_model.pth" ]; then
+            STABLE_CHECKPOINT="--resume_checkpoint $OUTPUT_DIR/l2_best_model.pth"
+            echo "📊 Resuming from L2 best model checkpoint"
+        else
+            echo "📊 Starting fresh L2 training"
+        fi
+    fi
 else
     echo "📊 Starting fresh L2 training"
 fi
 
 # H100-optimized L2 configuration summary
-echo "🔬 H100-OPTIMIZED L2 BASELINE CONFIGURATION:"
+echo "🔬 H100-OPTIMIZED L2 BASELINE CONFIGURATION (SMALLER FASTER MODEL):"
 echo "  Dataset: 42,109 tiles (30K train, 5.6K val, 6.4K test)"
 echo "  Domains: Photography (4ch), Microscopy (1ch), Astronomy (1ch)"
-echo "  Model: ${MODEL_CHANNELS}ch, ${NUM_BLOCKS} blocks, H100-optimized"
-echo "  Training: ${MAX_STEPS} steps (IDENTICAL to Poisson-Gaussian)"
+echo "  Model: ${MODEL_CHANNELS}ch, ${NUM_BLOCKS} blocks (~400M params, optimal for 128×128)"
+echo "  Training: Up to ${MAX_STEPS} steps (will plateau naturally)"
 echo "  Batch Strategy: ${BATCH_SIZE} physical × ${GRAD_ACCUM} accumulation = $((BATCH_SIZE * GRAD_ACCUM)) effective"
 echo "  H100 Features: BF16, TF32, Flash Attention, 80GB HBM3"
-echo "  Learning Rate: $LEARNING_RATE (IDENTICAL to Poisson-Gaussian)"
+echo "  Learning Rate: $LEARNING_RATE (optimized for batch size ${BATCH_SIZE})"
 echo "  Mixed Precision: $MIXED_PRECISION_FLAG (BF16 on H100)"
 echo "  🎯 GUIDANCE: L2 (MSE) - ABLATION BASELINE"
+echo "  📂 Output: ${OUTPUT_DIR} (separate from Poisson-Gaussian)"
 
 # H100-specific environment optimizations (IDENTICAL)
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:512
@@ -80,8 +94,8 @@ python train_l2_unified.py \\
     --learning_rate $LEARNING_RATE \\
     --model_channels ${MODEL_CHANNELS} \\
     --num_blocks ${NUM_BLOCKS} \\
-    --channel_mult_emb 8 \\
-    --output_dir results/l2_unified_h100_training \\
+    --channel_mult_emb ${CHANNEL_MULT_EMB} \\
+    --output_dir ${OUTPUT_DIR} \\
     --device cuda \\
     --h100_optimizations \\
     --mixed_precision \\
@@ -93,14 +107,15 @@ python train_l2_unified.py \\
 echo ""
 echo "🔬 H100-OPTIMIZED L2 BASELINE TRAINING STARTED!"
 echo ""
-echo "📊 L2 Ablation Configuration:"
-echo "  • Dataset: 42,109 clean tiles (IDENTICAL to Poisson-Gaussian)"
-echo "  • Model: ${MODEL_CHANNELS}-channel H100-optimized architecture (IDENTICAL)"
-echo "  • Training: ${MAX_STEPS} steps (IDENTICAL schedule)"
-echo "  • Batch Size: ${BATCH_SIZE} (leveraging 80GB HBM3, IDENTICAL)"
-echo "  • Effective Batch: $((BATCH_SIZE * GRAD_ACCUM)) (${BATCH_SIZE}×${GRAD_ACCUM} accumulation, IDENTICAL)"
-echo "  • Precision: BF16 (H100 native support, IDENTICAL)"
-echo "  • Learning Rate: $LEARNING_RATE (large batch optimized, IDENTICAL)"
+echo "📊 L2 Ablation Configuration (OPTIMIZED):"
+echo "  • Dataset: 42,109 clean tiles (same as Poisson-Gaussian)"
+echo "  • Model: ${MODEL_CHANNELS}-channel, ~400M params (optimal for 128×128)"
+echo "  • Training: Up to ${MAX_STEPS} steps (will plateau naturally)"
+echo "  • Batch Size: ${BATCH_SIZE} (4× larger with smaller model)"
+echo "  • Effective Batch: $((BATCH_SIZE * GRAD_ACCUM)) (${BATCH_SIZE}×${GRAD_ACCUM} accumulation)"
+echo "  • Precision: BF16 (H100 native support)"
+echo "  • Learning Rate: $LEARNING_RATE (optimized for batch ${BATCH_SIZE})"
+echo "  • Memory Usage: ~50-60GB (plenty of headroom)"
 echo "  🔬 GUIDANCE: L2 (MSE) - BASELINE FOR ABLATION"
 echo ""
 echo "🔥 H100-Specific Features (IDENTICAL to Poisson-Gaussian):"
@@ -121,10 +136,11 @@ echo "📱 Monitor with:"
 echo "  tmux attach -t h100_l2_unified_training"
 echo ""
 echo "🎯 Expected Performance (L2 Ablation):"
-echo "   Training time: ~0.75-1 day for 225K steps (REDUCED for faster ablation)"
-echo "   Memory usage: ~70-75GB (optimal H100 utilization)"
-echo "   Speed: ~2-3 steps/second (IDENTICAL)"
+echo "   Training time: Model will converge when optimal (likely 400-500K steps)"
+echo "   Memory usage: ~50-60GB (plenty of headroom)"
+echo "   Speed: ~8-10 steps/second (4× faster with smaller model)"
 echo "   Quality: Research-grade L2 baseline for comparison"
+echo "   Efficiency: Same quality with 75% fewer parameters"
 echo ""
 echo "🔬 ABLATION STUDY PURPOSE:"
 echo "   Compare L2 (MSE) vs Poisson-Gaussian guidance"
@@ -138,8 +154,11 @@ echo "   Step 150K: L2 All domains phase 1"
 echo "   Step 200K: L2 All domains phase 2"
 echo "   Step 225K: L2 Final unified model"
 echo ""
-echo "💾 L2 Checkpoints saved every 5K steps to:"
-echo "   results/l2_unified_h100_training/"
+echo "💾 L2 Checkpoints saved every 25K steps to:"
+echo "   ${OUTPUT_DIR}/"
+echo ""
+echo "⚠️ NOTE: Using NEW directory '${OUTPUT_DIR}' for L2 smaller model"
+echo "         (Separate from both Poisson-Gaussian and any large L2 models)"
 echo ""
 echo "🎯 COMPARISON STUDY:"
 echo "   After completion, compare with Poisson-Gaussian results"

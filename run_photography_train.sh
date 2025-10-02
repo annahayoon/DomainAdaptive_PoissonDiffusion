@@ -31,13 +31,20 @@ else
     echo "📊 Phase 1: Initial training, prioritizing stability"
 fi
 
-# Data path - CORRECTED to use the proper dataset
-REAL_DATA_PATH="/home/jilab/anna_OS_ML/PKL-DiffusionDenoising/data/preprocessed"
-if [ -d "$REAL_DATA_PATH" ] && [ "$(ls -A $REAL_DATA_PATH)" ]; then
-    DATA_ROOT="$REAL_DATA_PATH"
-    echo "✅ Using CORRECT dataset: $DATA_ROOT"
+# Data path - PNG format only
+PNG_DATA_PATH="/home/jilab/anna_OS_ML/PKL-DiffusionDenoising/data"
+
+# Check for PNG data
+if [ "$(find $PNG_DATA_PATH -name '*.png' -o -name '*.PNG' | head -1)" ]; then
+    DATA_ROOT="$PNG_DATA_PATH"
+    echo "✅ Using PNG dataset: $DATA_ROOT"
+    echo "   Format: 8-bit PNG images"
+    echo "   Normalization: [-1, 1] for diffusion training"
 else
-    echo "❌ Correct dataset not found at: $REAL_DATA_PATH"
+    echo "❌ No PNG files found!"
+    echo "   Checked PNG path: $PNG_DATA_PATH"
+    echo "   Please ensure PNG images are available"
+    echo "   Supported formats: .png, .PNG"
     DATA_ROOT="/tmp/dummy"
 fi
 
@@ -111,8 +118,8 @@ print()
 # Research optimizations
 print(\"🔬 RESEARCH OPTIMIZATIONS:\")
 print(\"  1. TRAINING LOSS: Poisson-Gaussian likelihood (physics-aware)\")
-print(\"  2. DATA LOADING: 2 workers with proper cleanup (optimized & safe)\")
-print(\"  3. DATASET: CORRECTED to use proper noisy data (SNR=1.1)\")
+print(\"  2. DATA LOADING: PNG format with [-1,1] normalization\")
+print(\"  3. DATASET: 8-bit PNG images with automatic preprocessing\")
 print(\"  4. MEMORY: Gradient checkpointing (fits large model)\")
 print(\"  5. MIXED PRECISION: Adaptive (FP32 start → FP16 when stable)\")
 print(\"  6. STABILITY: Ultra-conservative hyperparameters (prevents crashes)\")
