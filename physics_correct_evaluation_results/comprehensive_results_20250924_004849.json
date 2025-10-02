@@ -1,0 +1,30 @@
+{
+  "photography": {
+    "5000e": {
+      "electron_count": 5000,
+      "statistics": {
+        "psnr_mean": 7.295420169830322,
+        "psnr_std": 0.7705974578857422,
+        "chi2_mean": 237.7731170654297,
+        "chi2_std": 13.060592651367188,
+        "time_mean": 3.4369810819625854,
+        "time_std": 0.10679638385772705
+      },
+      "num_samples": 2
+    }
+  },
+  "microscopy": {
+    "2000e": {
+      "electron_count": 2000,
+      "statistics": {
+        "psnr_mean": 4.670095443725586,
+        "psnr_std": 0.11390805244445801,
+        "chi2_mean": 241.3098907470703,
+        "chi2_std": 0.0412445068359375,
+        "time_mean": 3.34218692779541,
+        "time_std": 0.005472660064697266
+      },
+      "num_samples": 2
+    }
+  }
+}

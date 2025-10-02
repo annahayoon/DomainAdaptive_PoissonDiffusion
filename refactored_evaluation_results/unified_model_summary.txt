@@ -1,0 +1,36 @@
+================================================================================
+UNIFIED MODEL EVALUATION SUMMARY
+================================================================================
+Evaluation Date: 2025-09-24 00:03:46
+Model: /home/jilab/checkpoint_step_0090000.pth
+Seed: 42 (deterministic)
+
+CROSS-DOMAIN PERFORMANCE:
+--------------------------------------------------
+PHOTOGRAPHY:
+  5000e⁻:
+    PSNR: 2.53±0.00 dB
+    χ²: 429.051±0.000 (POOR)
+    Time: 3.54±0.00 s
+
+MICROSCOPY:
+  2000e⁻:
+    PSNR: 3.21±0.00 dB
+    χ²: 272.304±0.000 (POOR)
+    Time: 3.33±0.00 s
+
+ASTRONOMY: No data available
+UNIFIED MODEL ANALYSIS:
+--------------------------------------------------
+Overall PSNR: 2.87±0.34 dB
+Overall χ²: 350.678±78.373
+Overall inference time: 3.44±0.11 s
+Physics consistency: 0/2 conditions
+
+CONCLUSIONS:
+--------------------------------------------------
+❌ Poor restoration quality (PSNR < 20 dB)
+❌ Poor physics consistency (χ² > 1.5)
+🚀 Unified model successfully handles all 3 domains
+
+================================================================================

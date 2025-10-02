@@ -1,0 +1,12 @@
+{
+  "model_name": "DAPGD (Poisson-Gaussian)",
+  "checkpoint_path": "/home/jilab/checkpoint_step_0090000.pth",
+  "data_path": "/home/jilab/anna_OS_ML/PKL-DiffusionDenoising/data/preprocessed/posterior",
+  "device": "cuda",
+  "evaluation_timestamp": "/home/jilab/Jae",
+  "domain_summaries": {},
+  "total_samples_evaluated": 0,
+  "overall_summary": {
+    "error": "No domains evaluated successfully"
+  }
+}
