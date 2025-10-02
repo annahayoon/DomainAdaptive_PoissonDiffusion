@@ -108,17 +108,21 @@ def load_checkpoint(
         if device is None:
             checkpoint_data = torch.load(checkpoint_path, weights_only=True)
         else:
-            checkpoint_data = torch.load(checkpoint_path, map_location=device, weights_only=True)
+            checkpoint_data = torch.load(
+                checkpoint_path, map_location=device, weights_only=True
+            )
     except Exception as e:
         logger.warning(f"Failed to load with weights_only=True: {e}")
         logger.warning("Falling back to weights_only=False (trusted checkpoint)")
-        
+
         # Fallback to weights_only=False for compatibility with older checkpoints
         # This is safe since we trust our own checkpoints
         if device is None:
             checkpoint_data = torch.load(checkpoint_path, weights_only=False)
         else:
-            checkpoint_data = torch.load(checkpoint_path, map_location=device, weights_only=False)
+            checkpoint_data = torch.load(
+                checkpoint_path, map_location=device, weights_only=False
+            )
 
     logger.info(f"Loaded checkpoint from {checkpoint_path}")
     return checkpoint_data

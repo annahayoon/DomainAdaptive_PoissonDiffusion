@@ -1499,14 +1499,14 @@ def main():
     else:
         # Use real PNG data
         logger.info("📁 Loading real PNG photography data...")
-        
+
         png_path = Path(args.data_root)
-        
+
         # Check for PNG files
         if any(png_path.rglob("*.png")) or any(png_path.rglob("*.PNG")):
             logger.info("🖼️  Using PNG data format (8-bit images)")
             from data.png_dataset import create_png_datasets
-            
+
             try:
                 train_dataset, val_dataset = create_png_datasets(
                     data_root=png_path,
@@ -1523,7 +1523,9 @@ def main():
         else:
             logger.error("❌ No PNG files found!")
             logger.error(f"   Checked PNG path: {png_path}")
-            logger.error("   Please ensure PNG images are available in the data directory")
+            logger.error(
+                "   Please ensure PNG images are available in the data directory"
+            )
             logger.error("   Supported formats: .png, .PNG")
             raise SystemExit("No PNG files found")
 
@@ -1533,7 +1535,7 @@ def main():
                 calculate_optimal_training_config,
                 print_training_analysis,
             )
-            
+
             dataset_size = len(train_dataset)
             optimal_config = calculate_optimal_training_config(
                 dataset_size, args.batch_size
@@ -1542,7 +1544,9 @@ def main():
             logger.info("🎯 AUTOMATIC TRAINING CONFIGURATION:")
             print_training_analysis(optimal_config)
         except ImportError:
-            logger.warning("⚠️  Training config utilities not available, using defaults")
+            logger.warning(
+                "⚠️  Training config utilities not available, using defaults"
+            )
         except Exception as e:
             logger.error(f"❌ Failed to load real preprocessed data: {e}")
             logger.error(f"   Expected data directory: {args.data_root}")

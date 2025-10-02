@@ -1,0 +1,55 @@
+{
+  "photography": {
+    "5000e": {
+      "electron_count": 5000,
+      "statistics": {
+        "psnr_mean": 2.530163526535034,
+        "psnr_std": 0.0,
+        "chi2_mean": 429.0511169433594,
+        "chi2_std": 0.0,
+        "time_mean": 3.5429012775421143,
+        "time_std": 0.0
+      },
+      "samples": [
+        {
+          "sample_id": 0,
+          "file_name": "scene_00189",
+          "metrics": {
+            "psnr": 2.530163526535034,
+            "ssim": 0.0013543892302496769,
+            "lpips": 0.0,
+            "chi2_consistency": 429.0511169433594
+          },
+          "inference_time": 3.5429012775421143
+        }
+      ]
+    }
+  },
+  "microscopy": {
+    "2000e": {
+      "electron_count": 2000,
+      "statistics": {
+        "psnr_mean": 3.20756733417511,
+        "psnr_std": 0.0,
+        "chi2_mean": 272.30419921875,
+        "chi2_std": 0.0,
+        "time_mean": 3.33007550239563,
+        "time_std": 0.0
+      },
+      "samples": [
+        {
+          "sample_id": 0,
+          "file_name": "seq2041_frame000",
+          "metrics": {
+            "psnr": 3.20756733417511,
+            "ssim": 0.14547669109555558,
+            "lpips": 0.0,
+            "chi2_consistency": 272.30419921875
+          },
+          "inference_time": 3.33007550239563
+        }
+      ]
+    }
+  },
+  "astronomy": {}
+}
