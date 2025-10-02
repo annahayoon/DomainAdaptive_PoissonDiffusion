@@ -1460,7 +1460,13 @@ def get_physics_based_calibration_demo(
 
     elif domain == "astronomy":
         # HST instrument parameters (measured values)
-        instrument = metadata.get("instrument", "ACS_WFC") if metadata else "ACS_WFC"
+        if metadata:
+            instrument_name = metadata.get("instrument", "ACS")
+            detector_name = metadata.get("detector", "WFC")
+            # Construct proper instrument key (e.g., "ACS_WFC", "WFC3_UVIS")
+            instrument = f"{instrument_name}_{detector_name}"
+        else:
+            instrument = "ACS_WFC"
 
         # Instrument-specific calibration parameters
         instrument_params = {
@@ -1479,7 +1485,16 @@ def get_physics_based_calibration_demo(
                 "read_noise": 15.0,
                 "method": "fits_header_analysis",
             },
-            "WFPC2": {"gain": 7.0, "read_noise": 6.5, "method": "fits_header_analysis"},
+            "WFPC2_WF": {
+                "gain": 7.0,
+                "read_noise": 6.5,
+                "method": "fits_header_analysis",
+            },
+            "WFPC2_PC": {
+                "gain": 7.0,
+                "read_noise": 6.5,
+                "method": "fits_header_analysis",
+            },
         }
 
         if instrument in instrument_params:
