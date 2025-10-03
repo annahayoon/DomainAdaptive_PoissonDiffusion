@@ -1156,8 +1156,8 @@ class ProgressiveEDM(nn.Module):
         if min_resolution not in [32, 64, 96, 128] or max_resolution not in [
             32,
             64,
-            96,
             128,
+            256,
         ]:
             raise ValueError(
                 f"Resolution must be one of [32, 64, 96, 128], got {min_resolution}, {max_resolution}"
