@@ -31,8 +31,8 @@ else
     echo "📊 Phase 1: Initial training, prioritizing stability"
 fi
 
-# Data path - PNG format only
-PNG_DATA_PATH="/home/jilab/anna_OS_ML/PKL-DiffusionDenoising/data"
+# Data path - PNG format only (use local processed data)
+PNG_DATA_PATH="/home/jilab/Jae/dataset/processed/png_tiles/photography"
 
 # Check for PNG data
 if [ "$(find $PNG_DATA_PATH -name '*.png' -o -name '*.PNG' | head -1)" ]; then
