@@ -8,7 +8,7 @@ Demonstrates domain-specific physics-based calibration methods
 import json
 import logging
 import os
-import pickle
+import pickle  # nosec B403 - Safe pickle usage for metadata serialization
 import sys
 import traceback
 from datetime import datetime
@@ -57,36 +57,37 @@ class SimpleTilesPipeline:
         # Unified tile configuration
         self.tile_size = 256
         self.overlap_ratios = {
-            "photography": 0.0,  # 0% overlap (2×4 = 8 tiles per image, 712×1064)
+            "photography": 0.0,  # 0% overlap (Sony: 9×6 = 54 tiles, Fuji: 6×4 = 24 tiles)
             "microscopy": 0.0,  # 0% overlap (4×4 = 16 tiles per image)
-            "astronomy": 0.0,  # 0% overlap (8×8 = 64 tiles per image)
+            "astronomy": 0.0,  # 0% overlap (9×9 = 81 tiles per image)
         }
 
         # Camera-specific overlap ratios for photography
         self.camera_overlap_ratios = {
-            "sony": 0.0,  # Sony: 0% overlap → 2×4 = 8 tiles
-            "fuji": 0.021,  # Fuji: 2.1% overlap → 4×6 = 24 tiles (with 4x downsampling)
+            "sony": 0.0,  # Sony: 0% overlap → 9×6 = 54 tiles
+            "fuji": 0.0,  # Fuji: 0% overlap → 6×4 = 24 tiles
         }
 
-        # Custom tiling for Sony to get exactly 8 tiles (2×4)
+        # Custom tiling for Sony to get exactly 54 tiles (9×6)
         self.sony_tile_config = {
             "tile_size": 256,
-            "target_tiles": 8,  # 2×4 = 8 tiles
-            "target_grid": (2, 4),  # 2 rows, 4 columns
+            "target_tiles": 54,  # 9×6 = 54 tiles
+            "target_grid": (9, 6),  # 9 rows, 6 columns
         }
 
-        # Custom tiling for Fuji to get exactly 24 tiles (4×6)
+        # Custom tiling for Fuji to get exactly 24 tiles (6×4)
         self.fuji_tile_config = {
             "tile_size": 256,
-            "target_tiles": 24,  # 4×6 = 24 tiles
-            "target_grid": (4, 6),  # 4 rows, 6 columns
+            "target_tiles": 24,  # 6×4 = 24 tiles
+            "target_grid": (6, 4),  # 6 rows, 4 columns
         }
 
         # Photography downsampling configuration - separate for Sony and Fuji
         self.downsample_photography = True
         self.downsample_factors = {
-            "sony": 2.0,  # Sony: 2848×4256 → 1424×2128 → 2×4 = 8 tiles
-            "fuji": 4.0,  # Fuji: 4032×6032 → 1008×1508 → 4×6 = 24 tiles
+            "sony": 2.0,  # Sony: 2848×4256 → 1424×2144 → 9×6 = 54 tiles
+            "fuji": 4.0,  # Fuji: 4032×6032 → 1008×1540 → 6×4 = 24 tiles
+            "astronomy": 1.0,  # Astronomy: downsampling to 2150×2150 → 9×9 = 81 tiles
         }
 
         # No additional output directories needed - tiles are saved to png_tiles/ and metadata to tiles_metadata.json
@@ -429,7 +430,7 @@ class SimpleTilesPipeline:
 
             # Image loaded successfully
 
-            # === STEP 1.5: Apply camera-specific downsampling for photography domain ===
+            # === STEP 1.5: Apply domain-specific downsampling ===
             if domain == "photography" and self.downsample_photography:
                 original_shape = image.shape
 
@@ -449,6 +450,31 @@ class SimpleTilesPipeline:
                 image = self._downsample_with_antialiasing(image, downsample_factor)
 
                 # Image downsampled with anti-aliasing
+
+            elif domain == "astronomy":
+                # Apply astronomy downsampling to 2150×2150
+                original_shape = image.shape
+                downsample_factor = self.downsample_factors["astronomy"]
+
+                # Calculate target size for astronomy (2150×2150)
+                target_size = 2150
+                if len(image.shape) == 3:
+                    H, W = image.shape[1], image.shape[2]
+                else:
+                    H, W = image.shape[0], image.shape[1]
+
+                # Calculate downsampling factor to reach target size
+                current_max_dim = max(H, W)
+                if current_max_dim > target_size:
+                    downsample_factor = current_max_dim / target_size
+                    image = self._downsample_with_antialiasing(image, downsample_factor)
+                    logger.info(
+                        f"🌟 Astronomy downsampled: {original_shape} → {image.shape} (factor: {downsample_factor:.2f}x)"
+                    )
+                else:
+                    logger.info(
+                        f"🌟 Astronomy image already at target size or smaller: {image.shape}"
+                    )
 
             # === STEP 2: Apply domain-specific calibration to FULL image ===
             gain, read_noise, calibration_method = self._get_physics_based_calibration(
@@ -617,22 +643,32 @@ class SimpleTilesPipeline:
             )
 
             # Extract tiles from calibrated 8-bit image
-            # Custom tiling for Sony to get exactly 8 tiles (2×4)
-            if domain == "photography" and metadata.get("file_path", "").endswith(
-                ".ARW"
-            ):
-                # Sony files: use custom tiling to get exactly 8 tiles
-                tile_infos = self._extract_sony_tiles(image_8bit)
+            # Custom tiling for photography based on camera type
+            if domain == "photography":
+                file_path_str = metadata.get("file_path", "")
+                if file_path_str.endswith(".ARW"):
+                    # Sony files: use custom tiling to get exactly 8 tiles (2×4)
+                    tile_infos = self._extract_sony_tiles(image_8bit)
+                elif file_path_str.endswith(".RAF"):
+                    # Fuji files: use custom tiling to get exactly 24 tiles (4×6)
+                    tile_infos = self._extract_fuji_tiles(image_8bit)
+                else:
+                    # Fallback to standard tiling
+                    tiler = SystematicTiler(config)
+                    tile_infos = tiler.extract_tiles(image_8bit)
+            elif domain == "astronomy":
+                # Custom tiling for astronomy to get exactly 81 tiles (9×9)
+                tile_infos = self._extract_astronomy_tiles(image_8bit)
             else:
-                # Standard tiling for other domains
+                # Standard tiling for microscopy (4×4 = 16 tiles)
                 tiler = SystematicTiler(config)
                 tile_infos = tiler.extract_tiles(image_8bit)
 
-                if not tile_infos:
-                    logger.warning(f"No tiles extracted from {file_path}")
-                    return []
+            if not tile_infos:
+                logger.warning(f"No tiles extracted from {file_path}")
+                return []
 
-                # Tiles extracted
+            # Tiles extracted
 
             # === STEP 6-8: Process tiles and separate prior/posterior, assign splits ===
             processed_tiles = []
@@ -934,12 +970,11 @@ class SimpleTilesPipeline:
         """
         Assign train/test/validation split based on scene_id using random assignment
 
-        Strategy:
-        - Noisy data (posterior): Used for training (with some validation)
-        - Clean data (prior): Used for testing only
+        FIXED STRATEGY - NO DATA LEAKAGE:
+        - Each scene gets assigned to ONE split only (train/val/test)
+        - ALL data types (clean/noisy) from same scene go to same split
         - 70% train, 15% validation, 15% test
-        - All tiles from same scene get same split (consistent within scene)
-        - Random assignment ensures proper distribution across scenes
+        - This prevents data leakage between training and testing
         """
 
         # Use random seed based on scene_id for consistent assignment within scene
@@ -947,22 +982,19 @@ class SimpleTilesPipeline:
         import random
 
         # Create deterministic seed from scene_id for consistent assignment within scene
-        seed = int(hashlib.md5(scene_id.encode()).hexdigest(), 16) % (2**32)
+        seed = int(
+            hashlib.md5(scene_id.encode(), usedforsecurity=False).hexdigest(), 16
+        ) % (2**32)
         random.seed(seed)
 
-        # Random assignment with proper distribution
+        # Random assignment with proper distribution - SAME FOR ALL DATA TYPES IN SCENE
         split_val = random.random() * 100  # 0-100
 
-        if data_type == "noisy":
-            # Noisy data: 70% train, 15% validation, 15% test
-            if split_val < 70:
-                return "train"
-            elif split_val < 85:
-                return "validation"
-            else:
-                return "test"
-        else:  # clean
-            # Clean data: All goes to test set (this is the prior for evaluation)
+        if split_val < 70:
+            return "train"
+        elif split_val < 85:
+            return "validation"
+        else:
             return "test"
 
     def _apply_physics_calibration(
@@ -1012,7 +1044,7 @@ class SimpleTilesPipeline:
             return image.astype(np.float32)
 
     def _extract_sony_tiles(self, image: np.ndarray) -> List[Any]:
-        """Extract exactly 8 tiles (2×4 grid) from Sony images"""
+        """Extract exactly 54 tiles (9×6 grid) from Sony images"""
         try:
             if len(image.shape) == 3:
                 C, H, W = image.shape
@@ -1021,9 +1053,9 @@ class SimpleTilesPipeline:
                 C = 1
                 image = image[np.newaxis, :, :]
 
-            # Calculate tile positions for 2×4 grid
-            # We want exactly 8 tiles: 2 rows × 4 columns
-            rows, cols = 2, 4
+            # Calculate tile positions for 9×6 grid
+            # We want exactly 54 tiles: 9 rows × 6 columns
+            rows, cols = 9, 6
 
             # Calculate tile size to fit the image
             tile_h = H // rows
@@ -1085,7 +1117,7 @@ class SimpleTilesPipeline:
             return []
 
     def _extract_fuji_tiles(self, image: np.ndarray) -> List[Any]:
-        """Extract exactly 24 tiles (4×6 grid) from Fuji images"""
+        """Extract exactly 24 tiles (6×4 grid) from Fuji images"""
         try:
             if len(image.shape) == 3:
                 C, H, W = image.shape
@@ -1094,9 +1126,9 @@ class SimpleTilesPipeline:
                 C = 1
                 image = image[np.newaxis, :, :]
 
-            # Calculate tile positions for 4×6 grid
-            # We want exactly 24 tiles: 4 rows × 6 columns
-            rows, cols = 4, 6
+            # Calculate tile positions for 6×4 grid
+            # We want exactly 24 tiles: 6 rows × 4 columns
+            rows, cols = 6, 4
 
             # Calculate tile size to fit the image
             tile_h = H // rows
@@ -1157,6 +1189,79 @@ class SimpleTilesPipeline:
             logger.error(f"Fuji tile extraction failed: {e}")
             return []
 
+    def _extract_astronomy_tiles(self, image: np.ndarray) -> List[Any]:
+        """Extract exactly 81 tiles (9×9 grid) from astronomy images"""
+        try:
+            if len(image.shape) == 3:
+                C, H, W = image.shape
+            else:
+                H, W = image.shape
+                C = 1
+                image = image[np.newaxis, :, :]
+
+            # Calculate tile positions for 9×9 grid
+            # We want exactly 81 tiles: 9 rows × 9 columns
+            rows, cols = 9, 9
+
+            # Calculate tile size to fit the image
+            tile_h = H // rows
+            tile_w = W // cols
+
+            # Ensure tiles are not larger than 256×256
+            tile_h = min(tile_h, 256)
+            tile_w = min(tile_w, 256)
+
+            tiles = []
+            for row in range(rows):
+                for col in range(cols):
+                    # Calculate tile position
+                    y_start = row * tile_h
+                    y_end = min((row + 1) * tile_h, H)
+                    x_start = col * tile_w
+                    x_end = min((col + 1) * tile_w, W)
+
+                    # Extract tile
+                    if len(image.shape) == 3:
+                        tile_data = image[:, y_start:y_end, x_start:x_end]
+                    else:
+                        tile_data = image[y_start:y_end, x_start:x_end]
+
+                    # Pad tile to 256×256 if needed
+                    if tile_data.shape[-2:] != (256, 256):
+                        if len(tile_data.shape) == 3:
+                            padded_tile = np.zeros((C, 256, 256), dtype=tile_data.dtype)
+                            padded_tile[
+                                :, : tile_data.shape[1], : tile_data.shape[2]
+                            ] = tile_data
+                        else:
+                            padded_tile = np.zeros((256, 256), dtype=tile_data.dtype)
+                            padded_tile[
+                                : tile_data.shape[0], : tile_data.shape[1]
+                            ] = tile_data
+                        tile_data = padded_tile
+
+                    # Create tile info object
+                    tile_info = type(
+                        "TileInfo",
+                        (),
+                        {
+                            "tile_data": tile_data,
+                            "grid_position": (col, row),
+                            "image_position": (x_start, y_start),
+                            "valid_ratio": 1.0,
+                            "is_edge_tile": False,
+                        },
+                    )()
+
+                    tiles.append(tile_info)
+
+            # Astronomy tiles extracted
+            return tiles
+
+        except Exception as e:
+            logger.error(f"Astronomy tile extraction failed: {e}")
+            return []
+
     def _downsample_with_antialiasing(
         self, image: np.ndarray, factor: float
     ) -> np.ndarray:
@@ -1188,8 +1293,9 @@ class SimpleTilesPipeline:
                     filtered_image, zoom_factors, order=1
                 )  # Linear interpolation
 
+                downsampling_factor = W / new_W
                 logger.info(
-                    f"📐 Aspect ratio maintained: {H}×{W} → {new_H}×{new_W} (ratio: {W/H:.3f})"
+                    f"📐 Downsampled: {H}×{W} → {new_H}×{new_W} (factor: {downsampling_factor:.1f}x, aspect: {W/H:.3f})"
                 )
 
             else:  # HW format
@@ -1208,8 +1314,9 @@ class SimpleTilesPipeline:
                     filtered_image, zoom_factors, order=1
                 )  # Linear interpolation
 
+                downsampling_factor = W / new_W
                 logger.info(
-                    f"📐 Aspect ratio maintained: {H}×{W} → {new_H}×{new_W} (ratio: {W/H:.3f})"
+                    f"📐 Downsampled: {H}×{W} → {new_H}×{new_W} (factor: {downsampling_factor:.1f}x, aspect: {W/H:.3f})"
                 )
 
             return downsampled.astype(image.dtype)
