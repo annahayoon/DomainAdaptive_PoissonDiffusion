@@ -57,7 +57,19 @@ python process_tiles_pipeline.py
 - **Demo mode**: ~1-2 minutes (calibration examples only)
 - **Test run** (3 files/domain): ~5-10 minutes
 - **Full run** (all files): ~2-4 hours
-- **Total output**: ~27,416 tiles
+- **Total output**: 78,806 tiles (39,403 clean + 39,403 noisy, perfect 1:1 mapping)
+
+### Expected Tile Counts (1:1 Clean ↔ Noisy Mapping)
+- **Photography**: 17,106 clean + 17,106 noisy = 34,212 tiles
+  - Sony: 231 pairs × 54 tiles = 12,474 clean + 12,474 noisy
+  - Fuji: 193 pairs × 24 tiles = 4,632 clean + 4,632 noisy
+- **Microscopy**: 9,904 clean + 9,904 noisy = 19,808 tiles
+  - 619 pairs × 16 tiles = 9,904 per type
+  - Standard cells (211): RawSIMData_gt (noisy) ↔ SIM_gt/SIM_gt_a (clean)
+  - ER cells (408 = 68×6): RawGTSIMData_level_XX (noisy) ↔ GTSIM_level_XX (clean)
+- **Astronomy**: 12,393 clean + 12,393 noisy = 24,786 tiles
+  - 153 pairs × 81 tiles = 12,393 per type
+  - g800l_sci (noisy) ↔ detection_sci (clean)
 
 ---
 
