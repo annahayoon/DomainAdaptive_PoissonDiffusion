@@ -8,7 +8,7 @@ import io
 import json
 import logging
 import os
-import pickle
+import pickle  # nosec B403 - Safe pickle usage for metadata serialization
 import sys
 import traceback
 from datetime import datetime
@@ -604,8 +604,42 @@ class SimpleTilesPipeline:
                     else:
                         tile_to_save = tile_float
 
-                    # Save as PNG
-                    tile_id = f"{domain}_{Path(file_path).stem}_tile_{i:04d}"
+                    # Save as PNG with unique tile_id
+                    # For photography: include camera type to avoid Sony/Fuji collisions
+                    # For microscopy: include parent directory structure to avoid file collisions
+                    base_stem = Path(file_path).stem
+
+                    if domain == "photography":
+                        # Add camera type to differentiate Sony (.ARW) vs Fuji (.RAF)
+                        file_ext = Path(file_path).suffix.upper()
+                        camera_prefix = (
+                            "sony"
+                            if file_ext == ".ARW"
+                            else "fuji"
+                            if file_ext == ".RAF"
+                            else "unknown"
+                        )
+                        tile_id = f"{domain}_{camera_prefix}_{base_stem}_tile_{i:04d}"
+                    elif domain == "microscopy":
+                        # Add parent directory info (structure/cell) to avoid collisions
+                        path_parts = Path(file_path).parts
+                        # Extract structure and cell from path like: structures/F-actin/Cell_005/file.mrc
+                        structure = "unknown"
+                        cell = "unknown"
+                        if "structures" in path_parts:
+                            struct_idx = path_parts.index("structures")
+                            if len(path_parts) > struct_idx + 1:
+                                structure = path_parts[struct_idx + 1]
+                            if len(path_parts) > struct_idx + 2:
+                                cell = path_parts[struct_idx + 2]
+                        # Create unique ID: microscopy_structure_cell_filename
+                        tile_id = (
+                            f"{domain}_{structure}_{cell}_{base_stem}_tile_{i:04d}"
+                        )
+                    else:
+                        # Default for other domains
+                        tile_id = f"{domain}_{base_stem}_tile_{i:04d}"
+
                     tile_metadata = self.save_tile_as_png(
                         tile_to_save,
                         tile_id,
@@ -925,6 +959,68 @@ class SimpleTilesPipeline:
 
         return selected_files
 
+    def reconstruct_metadata_from_incremental(self) -> Dict[str, Any]:
+        """
+        Reconstruct comprehensive metadata from incremental saves
+        Useful if the main metadata file was not saved due to interruption
+        """
+        logger.info("🔧 Attempting to reconstruct metadata from incremental saves...")
+
+        processed_dir = self.base_path / "processed"
+        incremental_files = list(processed_dir.glob("metadata_*_incremental.json"))
+
+        if not incremental_files:
+            logger.error("❌ No incremental metadata files found")
+            return None
+
+        all_tiles = []
+        domains = {}
+
+        for inc_file in incremental_files:
+            try:
+                with open(inc_file, "r") as f:
+                    inc_data = json.load(f)
+
+                domain_name = inc_data.get("domain", "unknown")
+                domains[domain_name] = {
+                    "files_processed": inc_data.get("files_processed", 0),
+                    "tiles_generated": inc_data.get("tiles_generated", 0),
+                }
+                all_tiles.extend(inc_data.get("tiles", []))
+
+                logger.info(
+                    f"✅ Loaded {len(inc_data.get('tiles', []))} tiles from {inc_file.name}"
+                )
+            except Exception as e:
+                logger.error(f"❌ Failed to load {inc_file.name}: {e}")
+
+        reconstructed_metadata = {
+            "pipeline_info": {
+                "total_tiles": len(all_tiles),
+                "domains_processed": list(domains.keys()),
+                "domain_stats": domains,
+                "processing_timestamp": datetime.now().isoformat(),
+                "tile_size": self.tile_size,
+                "overlap_ratios": self.overlap_ratios,
+                "reconstructed": True,
+            },
+            "tiles": all_tiles,
+        }
+
+        # Save the reconstructed metadata
+        metadata_path = (
+            self.base_path / "processed" / "comprehensive_tiles_metadata.json"
+        )
+        try:
+            with open(metadata_path, "w") as f:
+                json.dump(reconstructed_metadata, f, indent=2, default=str)
+            logger.info(f"✅ Reconstructed metadata saved to: {metadata_path}")
+            logger.info(f"📊 Total tiles reconstructed: {len(all_tiles):,}")
+        except Exception as e:
+            logger.error(f"❌ Failed to save reconstructed metadata: {e}")
+
+        return reconstructed_metadata
+
     def run_png_tiles_pipeline(self, max_files_per_domain: int = None):
         """Run the complete PNG tiles pipeline"""
 
@@ -1002,6 +1098,35 @@ class SimpleTilesPipeline:
             }
             results["total_tiles"] += len(domain_tiles)
 
+            # Save incremental metadata after each domain (in case of interruption)
+            try:
+                incremental_path = (
+                    self.base_path
+                    / "processed"
+                    / f"metadata_{domain_name}_incremental.json"
+                )
+                incremental_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(incremental_path, "w") as f:
+                    json.dump(
+                        {
+                            "domain": domain_name,
+                            "files_processed": processed_files,
+                            "tiles_generated": len(domain_tiles),
+                            "tiles": domain_tiles,
+                            "timestamp": datetime.now().isoformat(),
+                        },
+                        f,
+                        indent=2,
+                        default=str,
+                    )
+                logger.info(
+                    f"💾 Incremental metadata saved for {domain_name}: {incremental_path}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ Failed to save incremental metadata for {domain_name}: {e}"
+                )
+
             # Generated tiles from files
 
         # Save comprehensive metadata (includes all calibration, spatial, and processing info)
@@ -1023,13 +1148,29 @@ class SimpleTilesPipeline:
             "tiles": all_tiles_metadata,
         }
 
-        with open(metadata_path, "w") as f:
-            json.dump(comprehensive_metadata, f, indent=2, default=str)
+        # Save with error handling
+        try:
+            with open(metadata_path, "w") as f:
+                json.dump(comprehensive_metadata, f, indent=2, default=str)
+            logger.info(f"✅ Comprehensive metadata saved to: {metadata_path}")
+        except Exception as e:
+            logger.error(f"❌ Failed to save comprehensive metadata: {e}")
+            # Try to save to backup location
+            backup_path = (
+                self.base_path
+                / "processed"
+                / "comprehensive_tiles_metadata_backup.json"
+            )
+            try:
+                with open(backup_path, "w") as f:
+                    json.dump(comprehensive_metadata, f, indent=2, default=str)
+                logger.info(f"✅ Metadata saved to backup location: {backup_path}")
+            except Exception as e2:
+                logger.error(f"❌ Failed to save backup metadata: {e2}")
 
         logger.info(
             f"PNG Tiles Pipeline Completed: {results['total_tiles']:,} tiles generated"
         )
-        logger.info(f"📊 Comprehensive metadata saved to: {metadata_path}")
 
         return results
 
@@ -1184,7 +1325,9 @@ class SimpleTilesPipeline:
         import random
 
         # Create deterministic seed from scene_id for consistent assignment within scene
-        seed = int(hashlib.md5(scene_id.encode()).hexdigest(), 16) % (2**32)
+        seed = int(
+            hashlib.md5(scene_id.encode(), usedforsecurity=False).hexdigest(), 16
+        ) % (2**32)
         random.seed(seed)
 
         # Random assignment with proper distribution - SAME FOR ALL DATA TYPES IN SCENE
