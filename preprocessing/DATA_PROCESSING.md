@@ -200,7 +200,7 @@ for i, tile_info in enumerate(tiles):
     data_type = _determine_data_type(file_path, domain)  # clean/noisy
     scene_id = _get_scene_id(file_path, domain)
     split = _assign_split(scene_id, data_type)  # train/val/test
-
+    
     # Save as PNG file
     tile_id = f"{domain}_{Path(file_path).stem}_tile_{i:04d}"
     save_tile_as_png(tile_info.tile_data, tile_id, domain, data_type, gain, read_noise, method)
@@ -322,33 +322,33 @@ split_val = hash_val % 100  # Maps to 0-99
     "tile_id": str,                    # Unique tile identifier
     "domain": str,                     # photography/microscopy/astronomy
     "scene_id": str,                   # Scene grouping identifier
-
+    
     # Data classification
     "data_type": str,                  # noisy/clean
     "split": str,                      # train/validation/test
-
+    
     # PNG file information
     "png_path": str,                   # Path to PNG file
     "tile_size": int,                  # 256
     "channels": int,                   # 1 (grayscale) or 3 (RGB)
-
+    
     # Position information
     "grid_x": int,                     # Grid position X
     "grid_y": int,                     # Grid position Y
     "image_x": int,                    # Image position X
     "image_y": int,                    # Image position Y
-
+    
     # Physics-based calibration
     "gain": float,                     # Calibration gain (e-/ADU)
     "read_noise": float,               # Read noise (e-)
     "calibration_method": str,         # Calibration method name
-
+    
     # Quality metrics
     "quality_score": float,            # Mean tile intensity
     "valid_ratio": float,              # Valid pixel ratio
     "is_edge_tile": bool,              # Edge tile flag
     "overlap_ratio": float,             # Tile overlap ratio
-
+    
     # Processing metadata
     "source_file": str,                # Original source file path
     "processing_timestamp": str,       # ISO timestamp
@@ -451,16 +451,16 @@ import torch
 class DiffusionTileDataset(Dataset):
     def __init__(self, tiles_df, split="train"):
         self.tiles = tiles_df[tiles_df['split'] == split].reset_index(drop=True)
-
+        
     def __len__(self):
         return len(self.tiles)
-
+        
     def __getitem__(self, idx):
         row = self.tiles.iloc[idx]
-
+        
         # Load PNG tile
         tile_data = load_png_tile(row['png_path'])
-
+        
         return {
             'image': tile_data,
             'domain': row['domain'],
@@ -498,7 +498,7 @@ python process_tiles_pipeline.py --max_files 3
 # Will show:
 # 🚀 Starting Simple PNG Tiles Pipeline
 # 📷 Found X photography files
-# 🔬 Found Y microscopy files
+# 🔬 Found Y microscopy files  
 # 🌟 Found Z astronomy files
 # ✅ Generated N PNG tiles from each domain
 # 💾 Metadata saved to: tiles_metadata.json
@@ -537,7 +537,7 @@ print(tiles_df['domain'].value_counts())
 - `process_tiles_pipeline.py` - Main simple PNG tiles pipeline with domain-specific calibration
 - `domain_processors.py` - Domain-specific image processors
 - `complete_systematic_tiling.py` - Systematic tiling implementation
-- `astronomy_asinh_preprocessing.py` - Astronomy preprocessing module
+- `astronomy_asinh_preprocessing.py` - Astronomy preprocessing module 
 - `physics_based_calibration.py` - Physics-based calibration utilities
 - `visualize_calibration_standalone.py` - Calibration visualization tools
 
