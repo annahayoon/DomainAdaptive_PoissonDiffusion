@@ -1087,6 +1087,34 @@ class SimpleTilesPipeline:
                     tiles = self.process_file_to_png_tiles(file_path, domain_name)
                     domain_tiles.extend(tiles)
                     processed_files += 1
+
+                    # Save incremental metadata after EACH file (for better progress tracking)
+                    try:
+                        incremental_path = (
+                            self.base_path
+                            / "processed"
+                            / f"metadata_{domain_name}_incremental.json"
+                        )
+                        incremental_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(incremental_path, "w") as f:
+                            json.dump(
+                                {
+                                    "domain": domain_name,
+                                    "files_processed": processed_files,
+                                    "tiles_generated": len(domain_tiles),
+                                    "tiles": domain_tiles,
+                                    "timestamp": datetime.now().isoformat(),
+                                },
+                                f,
+                                indent=2,
+                                default=str,
+                            )
+                        logger.info(
+                            f"💾 Incremental save: {domain_name} - {processed_files} files, {len(domain_tiles)} tiles"
+                        )
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to save incremental metadata: {e}")
+
                 except Exception as e:
                     logger.error(f"❌ Error processing {file_path}: {e}")
                     continue
@@ -1098,34 +1126,10 @@ class SimpleTilesPipeline:
             }
             results["total_tiles"] += len(domain_tiles)
 
-            # Save incremental metadata after each domain (in case of interruption)
-            try:
-                incremental_path = (
-                    self.base_path
-                    / "processed"
-                    / f"metadata_{domain_name}_incremental.json"
-                )
-                incremental_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(incremental_path, "w") as f:
-                    json.dump(
-                        {
-                            "domain": domain_name,
-                            "files_processed": processed_files,
-                            "tiles_generated": len(domain_tiles),
-                            "tiles": domain_tiles,
-                            "timestamp": datetime.now().isoformat(),
-                        },
-                        f,
-                        indent=2,
-                        default=str,
-                    )
-                logger.info(
-                    f"💾 Incremental metadata saved for {domain_name}: {incremental_path}"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"⚠️ Failed to save incremental metadata for {domain_name}: {e}"
-                )
+            # Log final domain completion
+            logger.info(
+                f"✅ Domain {domain_name} completed: {processed_files} files, {len(domain_tiles)} tiles"
+            )
 
             # Generated tiles from files
 
@@ -1231,16 +1235,27 @@ class SimpleTilesPipeline:
         """Determine if file contains clean or noisy data"""
 
         file_path_lower = file_path.lower()
+        filename_lower = Path(file_path).name.lower()
 
         if domain == "photography":
             return "clean" if "/long/" in file_path_lower else "noisy"
         elif domain == "microscopy":
-            return "clean" if "gt" in Path(file_path).name.lower() else "noisy"
+            # Check for noisy patterns first (more specific)
+            if "rawsimdata" in filename_lower or "rawgtsimdata" in file_path_lower:
+                return "noisy"
+            # Then check for clean patterns
+            elif "sim_gt" in filename_lower or "gtsim" in file_path_lower:
+                return "clean"
+            # Fallback: if has "gt" in name, assume clean
+            elif "gt" in filename_lower:
+                return "clean"
+            else:
+                return "noisy"
         elif domain == "astronomy":
             # Hubble Legacy Archive:
             # - Direct image (detection_sci) = CLEAN reference (high SNR photometry)
             # - G800L grism (g800l_sci) = NOISY (spectroscopic with artifacts)
-            return "clean" if "detection" in Path(file_path).name.lower() else "noisy"
+            return "clean" if "detection" in filename_lower else "noisy"
 
         return "unknown"
 
