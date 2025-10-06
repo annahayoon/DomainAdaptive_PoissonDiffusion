@@ -2,19 +2,13 @@
 Data module for Domain-Adaptive Poisson-Gaussian Diffusion.
 
 This module contains:
-- Multi-format data loaders (RAW, TIFF, FITS)
-- Domain-specific datasets
+- PNG dataset for training
 - Data preprocessing utilities
 - Calibration management
 """
 
-from .domain_datasets import DomainDataset, MultiDomainDataset
-from .loaders import AstronomyLoader, MicroscopyLoader, PhotographyLoader
+from .png_dataset import create_edm_png_datasets
 
 __all__ = [
-    "DomainDataset",
-    "MultiDomainDataset",
-    "PhotographyLoader",
-    "MicroscopyLoader",
-    "AstronomyLoader",
+    "create_edm_png_datasets",
 ]

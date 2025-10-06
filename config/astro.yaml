@@ -1,0 +1,44 @@
+# Astronomy domain configuration
+# Overrides for default.yaml
+# Based on actual data from metadata_astronomy_incremental.json
+# Electron range: ~(-0.5) - 168 electrons (95th percentile: ~121)
+# Note: Very low signal levels with significant background subtraction
+
+# Physical parameters (from actual dataset statistics)
+physics:
+  s: 121.0  # Scale factor (95th percentile electron_max from data)
+  sigma_r: 3.5  # Read noise (all tiles have 3.5 electrons)
+  background: 3.5  # Background level (mean signal is near zero, significant background)
+
+# Domain configuration
+domain:
+  type: "astro"
+
+# Data configuration
+data:
+  image_size: 512  # Astronomical images can be large
+  target_size: 128
+  channels: 1  # Often single-band observations
+
+# Guidance configuration
+guidance:
+  enabled: true
+  mode: "wls"
+  kappa: 1.0  # Maximum guidance for extreme low light
+  tau: 0.005
+
+# Sampling configuration
+sampling:
+  num_steps: 75  # More steps for difficult regime
+  sigma_min: 0.002
+  sigma_max: 80.0
+  rho: 7.0
+
+# Training specific
+training:
+  data_root: "/home/jilab/Jae/dataset/processed/png_tiles/astronomy"
+  max_steps: 250000
+  batch_size: 1
+  gradient_accumulation_steps: 8
+  learning_rate: 3.0e-6
+  target_size: 128

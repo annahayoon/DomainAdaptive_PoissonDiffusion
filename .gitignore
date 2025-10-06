@@ -154,6 +154,7 @@ datasets/
 *.pt
 *.ckpt
 *.safetensors
+*.pkl
 models/pretrained/
 models/checkpoints/
 

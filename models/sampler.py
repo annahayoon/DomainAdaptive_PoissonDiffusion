@@ -152,11 +152,23 @@ class EDMPosteriorSampler:
 
     def _validate_components(self):
         """Validate model and guidance compatibility."""
+        # Accept EDMModelWrapper (or duck-type compatible models)
         if not isinstance(self.model, EDMModelWrapper):
-            raise ConfigurationError("Model must be EDMModelWrapper instance")
+            # Duck-typing check: model should be callable with (x, sigma, condition)
+            if not callable(self.model):
+                raise ConfigurationError(
+                    "Model must be EDMModelWrapper or callable with compatible signature"
+                )
 
+        # Accept PoissonGuidance or any wrapper with a compute method (duck-typing)
         if not isinstance(self.guidance, PoissonGuidance):
-            raise ConfigurationError("Guidance must be PoissonGuidance instance")
+            # Check if it has a compute method (duck-typing for wrappers)
+            if not hasattr(self.guidance, "compute") or not callable(
+                self.guidance.compute
+            ):
+                raise ConfigurationError(
+                    "Guidance must be PoissonGuidance instance or have a compute() method"
+                )
 
         # Check that model and guidance have compatible parameters
         # (This could be extended with more specific checks)

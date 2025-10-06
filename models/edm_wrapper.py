@@ -12,9 +12,6 @@ The wrapper integrates:
 - Multi-scale hierarchical processing with skip connections
 - Model initialization utilities and factory functions
 - Seamless integration with the existing EDM training pipeline
-
-Requirements addressed: 2.1, 4.1 from requirements.md
-Task: 3.1 from tasks.md
 """
 
 import logging
@@ -200,9 +197,12 @@ class DomainEncoder(nn.Module):
         """Initialize domain encoder."""
         super().__init__()
 
-        # Domain mappings
+        # Domain mappings with one-hot encoding:
+        # photography: 0 → [1, 0, 0]
+        # microscopy:  1 → [0, 1, 0]
+        # astronomy:   2 → [0, 0, 1]
         self.domain_to_idx = {"photography": 0, "microscopy": 1, "astronomy": 2}
-        self.domain_to_channels = {"photography": 4, "microscopy": 1, "astronomy": 1}
+        self.domain_to_channels = {"photography": 3, "microscopy": 1, "astronomy": 1}
 
         # Normalization parameters (learned from typical ranges)
         self.log_scale_mean = 2.5  # log10(~300)
@@ -266,8 +266,16 @@ class DomainEncoder(nn.Module):
             domain = [domain]
         if isinstance(domain, list):
             batch_size = len(domain)
+        elif isinstance(domain, torch.Tensor):
+            # Handle tensor input - get batch size from tensor shape
+            if domain.dim() == 0:
+                # Scalar tensor - batch size will be determined from other parameters
+                batch_size = None
+            else:
+                batch_size = domain.shape[0]
         else:
-            batch_size = domain.shape[0] if hasattr(domain, "shape") else 1
+            # Other types (int, etc.)
+            batch_size = None
 
         # Convert scalars to tensors
         if not isinstance(scale, torch.Tensor):
@@ -292,24 +300,78 @@ class DomainEncoder(nn.Module):
             read_noise = read_noise.to(device)
             background = background.to(device)
 
+        # Determine batch size from the largest parameter tensor
+        param_tensors = [scale, read_noise, background]
+        param_batch_sizes = [t.shape[0] if t.dim() > 0 else 1 for t in param_tensors]
+        param_batch_size = max(param_batch_sizes)
+
+        # Use domain-based batch size if available, otherwise use param-based
+        if batch_size is None:
+            batch_size = param_batch_size
+        else:
+            # Use the maximum of both to ensure consistency
+            batch_size = max(batch_size, param_batch_size)
+
         # Expand to batch size if needed
-        if scale.dim() == 0:
+        if scale.dim() == 0 or scale.shape[0] == 1:
             scale = scale.expand(batch_size)
-        if read_noise.dim() == 0:
+        if read_noise.dim() == 0 or read_noise.shape[0] == 1:
             read_noise = read_noise.expand(batch_size)
-        if background.dim() == 0:
+        if background.dim() == 0 or background.shape[0] == 1:
             background = background.expand(batch_size)
 
-        # Create domain one-hot encoding
+        # Create domain one-hot encoding: photography=[1,0,0], microscopy=[0,1,0], astronomy=[0,0,1]
         if isinstance(domain, list):
-            domain_indices = [self.domain_to_idx[d] for d in domain]
-            domain_tensor = torch.tensor(domain_indices, dtype=torch.long)
+            # Check if list contains tensors or strings
+            if len(domain) > 0 and isinstance(domain[0], torch.Tensor):
+                # List of tensors - extract indices
+                domain_indices = []
+                for d in domain:
+                    if d.dim() == 0:
+                        domain_indices.append(d.long().item())
+                    else:
+                        domain_indices.append(d[0].long().item())
+                domain_tensor = torch.tensor(domain_indices, dtype=torch.long)
+            else:
+                # List of strings - look up indices and expand if needed
+                if len(domain) == 1 and batch_size > 1:
+                    # Single domain needs to be expanded to batch size
+                    domain_idx = self.domain_to_idx[domain[0]]
+                    domain_tensor = torch.full(
+                        (batch_size,), domain_idx, dtype=torch.long
+                    )
+                else:
+                    # Multiple domains or already correct batch size
+                    domain_indices = [self.domain_to_idx[d] for d in domain]
+                    domain_tensor = torch.tensor(domain_indices, dtype=torch.long)
+        elif isinstance(domain, torch.Tensor):
+            # Handle tensor input - already indices
+            if domain.dim() == 0:
+                # Scalar tensor - expand to batch size
+                domain_tensor = domain.long().expand(batch_size)
+            else:
+                # 1D tensor of indices, ensure it's the right type
+                domain_tensor = domain.long()
+        elif isinstance(domain, str):
+            # Handle single string domain - look up index and expand to batch size
+            domain_idx = self.domain_to_idx[domain]
+            domain_tensor = torch.full((batch_size,), domain_idx, dtype=torch.long)
+        elif isinstance(domain, int):
+            # Handle integer domain index directly - expand to batch size
+            domain_tensor = torch.full((batch_size,), domain, dtype=torch.long)
         else:
-            domain_tensor = domain
+            # Handle other cases
+            try:
+                domain_tensor = torch.full((batch_size,), domain, dtype=torch.long)
+            except:
+                raise ValueError(
+                    f"Unsupported domain type: {type(domain)}, value: {domain}"
+                )
 
         if device is not None:
             domain_tensor = domain_tensor.to(device)
 
+        # Create one-hot encoding
         domain_onehot = torch.zeros(batch_size, 3, device=device or scale.device)
         domain_onehot.scatter_(1, domain_tensor.unsqueeze(1), 1.0)
 
@@ -520,7 +582,9 @@ class EDMModelWrapper(nn.Module):
 
         # Model metadata
         self.model_type = "edm_wrapper"
-        self.condition_dim = 6
+        self.condition_dim = (
+            self.config.label_dim
+        )  # 0 for no conditioning, 6 for domain conditioning
 
         logger.info(
             f"EDMModelWrapper initialized: {conditioning_mode} conditioning, "
@@ -529,9 +593,9 @@ class EDMModelWrapper(nn.Module):
 
     def _validate_config(self):
         """Validate configuration parameters."""
-        if self.config.label_dim != 6:
+        if self.config.label_dim not in [0, 6]:
             raise ConfigurationError(
-                f"label_dim must be 6 for domain conditioning, got {self.config.label_dim}"
+                f"label_dim must be 0 (no conditioning) or 6 (domain conditioning), got {self.config.label_dim}"
             )
 
         if self.conditioning_mode not in ["class_labels", "film"]:
@@ -540,10 +604,10 @@ class EDMModelWrapper(nn.Module):
             )
 
         # Support for multiple domains with different channel configurations
-        # Photography: 4 channels (RGGB), Microscopy/Astronomy: 1 channel (grayscale)
-        if self.config.img_channels not in [1, 4]:
+        # Photography: 3 channels (RGB), Microscopy/Astronomy: 1 channel (grayscale)
+        if self.config.img_channels not in [1, 3]:
             logger.warning(
-                f"img_channels={self.config.img_channels}, expected 1 or 4 for domain compatibility"
+                f"img_channels={self.config.img_channels}, expected 1 or 3 for domain compatibility"
             )
 
     def forward(
@@ -886,11 +950,11 @@ def create_multi_domain_edm_wrapper(
     Returns:
         Multi-domain compatible EDMModelWrapper
     """
-    # Use 4 channels by default to support photography (most demanding)
+    # Use 3 channels by default to support RGB photography
     # The domain conditioning will handle the differences
     config = EDMConfig(
         img_resolution=img_resolution,
-        img_channels=4,  # Support up to 4 channels for photography
+        img_channels=3,  # RGB photography (3 channels)
         model_channels=model_channels,
         **config_overrides,
     )
@@ -918,8 +982,8 @@ def create_domain_aware_edm_wrapper(
     Returns:
         Domain-aware EDMModelWrapper
     """
-    # Domain-specific channel configurations
-    domain_channels = {"photography": 4, "microscopy": 1, "astronomy": 1}
+    # Domain-specific channel configurations (RGB photography)
+    domain_channels = {"photography": 3, "microscopy": 1, "astronomy": 1}
 
     if domain not in domain_channels:
         raise ValueError(
@@ -1632,17 +1696,17 @@ def test_multi_domain_edm_wrapper() -> bool:
         True if test passes
     """
     try:
-        # Test photography (4 channels)
-        model_4ch = create_multi_domain_edm_wrapper(model_channels=32)
-        model_4ch.eval()
+        # Test photography (3 channels - RGB)
+        model_3ch = create_multi_domain_edm_wrapper(model_channels=32)
+        model_3ch.eval()
 
-        # Test data for 4 channels
+        # Test data for 3 channels (RGB photography)
         batch_size = 2
-        x_4ch = torch.randn(batch_size, 4, 32, 32)
+        x_3ch = torch.randn(batch_size, 3, 32, 32)
         sigma = torch.tensor([1.0, 0.5])
 
         # Test conditioning for photography
-        condition = model_4ch.encode_conditioning(
+        condition = model_3ch.encode_conditioning(
             domain=["photography", "photography"],
             scale=[1000.0, 500.0],
             read_noise=[3.0, 2.0],
@@ -1651,17 +1715,17 @@ def test_multi_domain_edm_wrapper() -> bool:
 
         # Forward pass
         with torch.no_grad():
-            output = model_4ch(x_4ch, sigma, condition=condition)
+            output = model_3ch(x_3ch, sigma, condition=condition)
 
         # Check output shape
-        assert output.shape == x_4ch.shape
+        assert output.shape == x_3ch.shape
         assert torch.isfinite(output).all()
 
         # Test microscopy (1 channel) with same model
         x_1ch = torch.randn(batch_size, 1, 32, 32)
 
         # Test conditioning for microscopy
-        condition_micro = model_4ch.encode_conditioning(
+        condition_micro = model_3ch.encode_conditioning(
             domain=["microscopy", "microscopy"],
             scale=[1000.0, 500.0],
             read_noise=[3.0, 2.0],
@@ -1670,17 +1734,17 @@ def test_multi_domain_edm_wrapper() -> bool:
 
         # Forward pass
         with torch.no_grad():
-            output_micro = model_4ch(x_1ch, sigma, condition=condition_micro)
+            output_micro = model_3ch(x_1ch, sigma, condition=condition_micro)
 
-        # Check output shape (should be padded to 4 channels)
-        assert output_micro.shape == (batch_size, 4, 32, 32)
+        # Check output shape (should be padded to 3 channels)
+        assert output_micro.shape == (batch_size, 3, 32, 32)
         assert torch.isfinite(output_micro).all()
 
         # Test astronomy (1 channel) with same model
         x_astro = torch.randn(batch_size, 1, 32, 32)
 
         # Test conditioning for astronomy
-        condition_astro = model_4ch.encode_conditioning(
+        condition_astro = model_3ch.encode_conditioning(
             domain=["astronomy", "astronomy"],
             scale=[1000.0, 500.0],
             read_noise=[3.0, 2.0],
@@ -1689,10 +1753,10 @@ def test_multi_domain_edm_wrapper() -> bool:
 
         # Forward pass
         with torch.no_grad():
-            output_astro = model_4ch(x_astro, sigma, condition=condition_astro)
+            output_astro = model_3ch(x_astro, sigma, condition=condition_astro)
 
-        # Check output shape (should be padded to 4 channels)
-        assert output_astro.shape == (batch_size, 4, 32, 32)
+        # Check output shape (should be padded to 3 channels)
+        assert output_astro.shape == (batch_size, 3, 32, 32)
         assert torch.isfinite(output_astro).all()
 
         logger.info("Multi-domain EDM wrapper test passed")

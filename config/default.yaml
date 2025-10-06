@@ -1,0 +1,96 @@
+# Default configuration for DAPGD
+# Override specific domains with photo.yaml, micro.yaml, astro.yaml
+
+# Model configuration
+model:
+  checkpoint: "checkpoints/edm_model.pt"
+  device: "cuda"
+  precision: "float32"  # or "float16" for faster inference
+  model_channels: 256
+  channel_mult: [1, 2, 3, 4]
+  channel_mult_emb: 6
+  num_blocks: 6
+  attn_resolutions: [16, 32, 64, 128]
+
+# Sampling configuration
+sampling:
+  num_steps: 50
+  sigma_min: 0.002
+  sigma_max: 80.0
+  rho: 7.0
+  S_churn: 0.0  # 0 = deterministic
+  use_heun: true  # Second-order sampler
+
+# Guidance configuration
+guidance:
+  enabled: true
+  mode: "wls"  # "wls" or "full"
+  kappa: 0.5
+  tau: 0.01
+
+# Physical parameters (defaults for photography domain)
+# Based on actual dataset: metadata_photography_incremental.json
+physics:
+  s: 79351.0  # Scale factor (95th percentile from actual data)
+  sigma_r: 3.6  # Read noise (median from actual data: 3.56 electrons)
+  background: 0.0  # Background level
+
+# Domain configuration
+domain:
+  type: "photo"  # "photo", "micro", or "astro"
+
+# Data configuration
+data:
+  image_size: 256
+  target_size: 64  # For training
+  channels: 3
+  normalize: true
+  clip_range: [0.0, 1.0]
+
+# Training configuration (from run_photography_train.sh)
+training:
+  max_steps: 200000
+  batch_size: 1
+  gradient_accumulation_steps: 4
+  learning_rate: 5.0e-6
+  num_workers: 12
+  prefetch_factor: 2
+  pin_memory: true
+  seed: 42
+  mixed_precision: false
+  gradient_checkpointing: true
+  gradient_clip_norm: 0.1
+  save_frequency_steps: 5000
+  val_frequency_steps: 5000
+  early_stopping_patience_steps: 5000
+  max_checkpoints: 10
+  save_best_model: true
+  checkpoint_metric: "val_loss"
+
+# Evaluation configuration
+evaluation:
+  compute_psnr: true
+  compute_ssim: true
+  compute_lpips: true
+  compute_chi2: true
+
+# Logging configuration
+logging:
+  log_dir: "experiments/runs"
+  log_level: "INFO"
+  save_intermediate: false  # Save x_t at each step?
+  save_frequency: 10  # Save every N steps if enabled
+  use_tensorboard: true
+  use_wandb: false  # Set true if using Weights & Biases
+
+# Output configuration
+output:
+  save_dir: "experiments/results"
+  save_format: "png"  # "png", "tiff", "npy"
+  save_comparison: true  # Save noisy/restored side-by-side
+
+# System configuration
+system:
+  cuda_alloc_conf: "expandable_segments:True,max_split_size_mb:512"
+  cuda_launch_blocking: 1
+  omp_num_threads: 4

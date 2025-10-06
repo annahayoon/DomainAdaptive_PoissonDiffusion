@@ -1,6 +1,0 @@
-{
-  "error": "('{} cannot be pickled', '_MultiProcessingDataLoaderIter')",
-  "training_time_hours": 0.09405781149864197,
-  "failed_epoch": 0,
-  "device": "cuda"
-}

@@ -19,7 +19,6 @@ import torch
 sys.path.append(str(Path(__file__).parent))
 
 from core.calibration import SensorCalibration
-from data.loaders import AstronomyLoader
 
 
 def load_trained_model(model_path: str, device: str = "cuda"):
@@ -87,51 +86,16 @@ def evaluate_trained_model():
     model_path = "hpc_result/best_model.pt"
     model = load_trained_model(model_path, device)
 
-    # Setup data loading
-    loader = AstronomyLoader()
+    # Setup calibration for astronomy domain
     calibration = SensorCalibration(domain="astronomy")
 
-    # Load one astronomy image
-    fits_file = Path("data/raw/astronomy/noisy/sample_000.fits")
+    # Note: This script requires raw astronomy FITS files for evaluation
+    # Since loaders.py was removed, this functionality needs to be adapted
+    # for the current preprocessing pipeline
 
-    print(f"Loading {fits_file}...")
-    raw_data, metadata = loader.load_raw_data(fits_file)
-
-    print(f"Raw data shape: {raw_data.shape}")
-    print(f"Data range: {raw_data.min():.1f} to {raw_data.max():.1f}")
-
-    # Apply calibration to convert to electrons
-    electrons = calibration.process_raw(raw_data)
-
-    # Normalize for model input
-    scale = np.percentile(electrons, 99.9)
-    normalized = np.clip(electrons / scale, 0, 1)
-
-    # Ensure 2D
-    if normalized.ndim > 2:
-        normalized = normalized.squeeze()
-        while normalized.ndim > 2:
-            normalized = normalized.squeeze()
-
-    print(f"Normalized shape: {normalized.shape}")
-    print(f"Normalized range: {normalized.min():.3f} to {normalized.max():.3f}")
-
-    # Run inference with trained model
-    print("Running model inference...")
-    start_time = time.time()
-    denoised = inference_with_model(model, normalized, device)
-    inference_time = time.time() - start_time
-
-    print(f"Inference completed in {inference_time:.2f}s")
-    print(f"Output shape: {denoised.shape}")
-    print(f"Output range: {denoised.min():.3f} to {denoised.max():.3f}")
-
-    # Create comparison visualization
-    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
-
-    # Original noisy image
-    axes[0].imshow(normalized, cmap="gray", vmin=0, vmax=1)
-    axes[0].set_title("Original (Noisy Raw Data)")
+    print("WARNING: AstronomyLoader functionality removed.")
+    print("This script needs to be adapted for the current preprocessing pipeline.")
+    return  # Exit early since loader functionality is not available
     axes[0].axis("off")
 
     # Model prediction

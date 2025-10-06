@@ -1,5 +1,5 @@
 """
-Advanced error handling utilities for Poisson-Gaussian Diffusion.
+Error handling utilities for Poisson-Gaussian Diffusion.
 
 This module provides sophisticated error handling, recovery mechanisms,
 and diagnostic tools for robust operation in production environments.
@@ -208,7 +208,6 @@ class NumericalStabilityManager:
             else:
                 raise NumericalStabilityError(f"{name} contains Inf values")
 
-        # Check range violations
         if self.range_min is not None:
             below_min = fixed_tensor < self.range_min
             if below_min.any():
@@ -235,7 +234,6 @@ class NumericalStabilityManager:
                         f"{name} contains values above maximum {self.range_max}"
                     )
 
-        # Log issues if any were found
         if issues and fix_issues:
             self.logger.warning(f"Fixed {name}: {', '.join(issues)}")
 
