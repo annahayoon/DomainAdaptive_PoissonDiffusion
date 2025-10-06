@@ -34,13 +34,13 @@ A unified framework for low-light image restoration across photography, microsco
 
 ```
 Input Pipeline:
-RAW File → Calibration → Electrons → Normalize[0,1] → Transform(128×128)
+RAW File → Calibration → Electrons → Normalize[0,1] → Transform(256×256)
 
 Processing Pipeline:
-Noisy(128×128) → Domain Conditioning → EDM Diffusion → Physics Guidance → Denoised(128×128)
+Noisy(256×256) → Domain Conditioning → EDM Diffusion → Physics Guidance → Denoised(256×256)
 
 Output Pipeline:
-Denoised(128×128) → Inverse Transform → Original Size → Final Output
+Denoised(256×256) → Inverse Transform → Original Size → Final Output
 ```
 
 ## Recent Implementation Highlights
@@ -93,9 +93,9 @@ poisson-diffusion/
 ## Citation
 
 ```bibtex
-@article{poisson-diffusion-2024,
+@article{poisson-diffusion-2025,
   title={Domain-Adaptive Poisson-Gaussian Diffusion for Low-Light Image Restoration},
-  author={[Yoon, Ha Yun ANna Yoo]},
+  author={[Yoon, Ha Yun Anna Yoon; Hong, Jaewan
   journal={[Journal]},
   year={2025}
 }
