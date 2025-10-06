@@ -266,9 +266,10 @@ scripts/
 *_ANALYSIS.md
 *_ESTIMATE.md
 *_REVIEW.md
+DAPGD_Implementation.md
 physics_validation_summary.md
-corrected_phase*_assessment.md
 plan.md
+corrected_phase*_assessment.md
 
 # Temporary test/debug scripts
 test_*.py
