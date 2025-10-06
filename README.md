@@ -4,7 +4,7 @@ A unified framework for low-light image restoration across photography, microsco
 
 ## Project Status
 
-🚧 **Currently in development** - Phase 1: Core Infrastructure
+🚧 **Currently in development** - Phase 3: Model Training & Validation
 
 ## Recent Progress
 
@@ -15,9 +15,13 @@ A unified framework for low-light image restoration across photography, microsco
   - ✅ **Task 1.1**: Project structure and base interfaces
   - ✅ **Task 1.2**: Error handling framework
   - ✅ **Task 1.3**: Reversible transforms with tests
-- ⏳ **Phase 2 In Progress**: Physics Foundation
+- ✅ **Phase 2 Complete**: Physics Foundation
   - ✅ **Task 2.1**: Implement calibration system (EXCELLENT)
-  - ⏳ **Task 2.2**: Implement Poisson-Gaussian guidance
+  - ✅ **Task 2.2**: Implement Poisson-Gaussian guidance
+- 🚧 **Phase 3 In Progress**: Model Training & Validation
+  - ✅ **Task 3.1**: EDM native training implementation
+  - ✅ **Task 3.2**: Photography domain training pipeline
+  - ⏳ **Task 3.3**: Cross-domain validation and evaluation
 
 ## Key Features
 
@@ -38,6 +42,15 @@ Noisy(128×128) → Domain Conditioning → EDM Diffusion → Physics Guidance �
 Output Pipeline:
 Denoised(128×128) → Inverse Transform → Original Size → Final Output
 ```
+
+## Recent Implementation Highlights
+
+### EDM Native Training
+- **Native EDM Integration**: Full integration with EDM's training utilities and architecture
+- **Photography Domain**: Optimized training pipeline for photography datasets
+- **Real-time Monitoring**: Split-screen GPU monitoring with detailed memory and performance tracking
+- **Conservative Training**: Optimized hyperparameters to prevent overfitting on limited datasets
+- **Early Stopping**: Automated validation and early stopping to prevent overtraining
 
 ## Installation
 
@@ -68,20 +81,23 @@ poisson-diffusion/
 ## Development Status
 
 - [x] Project specification and design
-- [ ] External dependencies setup (EDM integration)
-- [ ] Core infrastructure implementation
-- [ ] Physics-based guidance system
-- [ ] Model integration and training
-- [ ] Evaluation and validation
+- [x] External dependencies setup (EDM integration)
+- [x] Core infrastructure implementation
+- [x] Physics-based guidance system
+- [x] EDM native training implementation
+- [x] Photography domain training pipeline
+- [ ] Cross-domain validation and evaluation
+- [ ] Multi-domain model training
+- [ ] Comprehensive evaluation framework
 
 ## Citation
 
 ```bibtex
 @article{poisson-diffusion-2024,
   title={Domain-Adaptive Poisson-Gaussian Diffusion for Low-Light Image Restoration},
-  author={[Authors]},
+  author={[Yoon, Ha Yun ANna Yoo]},
   journal={[Journal]},
-  year={2024}
+  year={2025}
 }
 ```
 
