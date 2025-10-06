@@ -41,7 +41,7 @@ from models.edm_wrapper import (
     create_domain_edm_wrapper,
 )
 from models.sampler import create_edm_sampler, create_fast_sampler
-from poisson_training.utils import load_checkpoint
+from utils import load_checkpoint
 
 logger = get_logger(__name__)
 
@@ -181,40 +181,115 @@ def load_model(checkpoint_path: str, device: torch.device) -> nn.Module:
 def load_test_data(
     test_data_dir: str, max_samples: int = 5
 ) -> List[Tuple[torch.Tensor, torch.Tensor, Dict]]:
-    """Load test data samples."""
+    """Load test data samples from PNG files."""
     test_data_dir = Path(test_data_dir)
+
+    # Check if it's the .pt format or PNG format
     posterior_dir = test_data_dir / "posterior" / "photography" / "test"
-    prior_dir = test_data_dir / "prior_clean" / "photography" / "test"
 
-    logger.info(f"Loading test data from {test_data_dir}")
+    if posterior_dir.exists():
+        # Old .pt format
+        logger.info(f"Loading test data from {test_data_dir} (PyTorch format)")
+        posterior_files = sorted(list(posterior_dir.glob("scene_*.pt")))[:max_samples]
 
-    # Get available test scenes
-    posterior_files = sorted(list(posterior_dir.glob("scene_*.pt")))[:max_samples]
+        test_samples = []
+        for posterior_file in posterior_files:
+            scene_name = posterior_file.stem
+            logger.info(f"Loading {scene_name}")
 
-    test_samples = []
+            posterior_data = torch.load(
+                posterior_file, map_location="cpu", weights_only=False
+            )
 
-    for posterior_file in posterior_files:
-        scene_name = posterior_file.stem  # e.g., "scene_00011"
+            noisy = posterior_data["noisy_norm"]
+            clean = posterior_data["clean_norm"]
+            metadata = posterior_data.get("metadata", {})
 
-        logger.info(f"Loading {scene_name}")
+            test_samples.append((noisy, clean, metadata))
+            logger.info(
+                f"Loaded {scene_name}: noisy shape {noisy.shape}, clean shape {clean.shape}"
+            )
+    else:
+        # PNG format - assume structure: test_data_dir/noisy/ and test_data_dir/clean/
+        noisy_dir = test_data_dir / "noisy"
+        clean_dir = test_data_dir / "clean"
 
-        # Load posterior (noisy) data
-        posterior_data = torch.load(
-            posterior_file, map_location="cpu", weights_only=False
-        )
+        if not noisy_dir.exists():
+            # Maybe test_data_dir IS the noisy dir
+            if (test_data_dir / "photography").exists():
+                noisy_dir = test_data_dir / "photography" / "noisy"
+                clean_dir = test_data_dir / "photography" / "clean"
+            elif (
+                test_data_dir.name == "noisy"
+                and (test_data_dir.parent / "clean").exists()
+            ):
+                clean_dir = test_data_dir.parent / "clean"
+                noisy_dir = test_data_dir
 
-        # Extract relevant data
-        noisy = posterior_data["noisy_norm"]  # [4, H, W] - noisy input
-        clean = posterior_data[
-            "clean_norm"
-        ]  # [4, H, W] - TRUE ground truth (clean version of the same scene)
-        metadata = posterior_data.get("metadata", {})
+        logger.info(f"Loading PNG test data from {noisy_dir}")
 
-        test_samples.append((noisy, clean, metadata))
+        # Get matching pairs of noisy/clean images
+        noisy_files = sorted(list(noisy_dir.glob("*.png")))[
+            : max_samples * 10
+        ]  # Get more to find matches
 
-        logger.info(
-            f"Loaded {scene_name}: noisy shape {noisy.shape}, clean shape {clean.shape}"
-        )
+        test_samples = []
+        for noisy_file in noisy_files:
+            # Extract scene identifier (e.g., "photography_fuji_00001_00")
+            # Format: photography_fuji_XXXXX_XX_0.1s_tile_XXXX.png
+            import re
+
+            match = re.search(r"(photography_fuji_\d+_\d+)_", noisy_file.name)
+            if not match:
+                continue
+
+            scene_id = match.group(1)
+
+            # Find corresponding clean file
+            # Clean format: photography_fuji_XXXXX_XX_10s_tile_XXXX.png
+            clean_pattern = f"{scene_id}_10s_tile_*.png"
+            clean_files = list(clean_dir.glob(clean_pattern))
+
+            if not clean_files:
+                continue
+
+            clean_file = clean_files[0]  # Take first matching tile
+
+            # Load images
+            import numpy as np
+            from PIL import Image
+
+            noisy_img = Image.open(noisy_file)
+            clean_img = Image.open(clean_file)
+
+            # Convert to tensor [C, H, W] in range [0, 1]
+            noisy_array = np.array(noisy_img).astype(np.float32) / 255.0
+            clean_array = np.array(clean_img).astype(np.float32) / 255.0
+
+            # Handle grayscale
+            if noisy_array.ndim == 2:
+                noisy_array = noisy_array[..., np.newaxis]
+            if clean_array.ndim == 2:
+                clean_array = clean_array[..., np.newaxis]
+
+            # Convert to CHW format
+            noisy_tensor = torch.from_numpy(noisy_array).permute(2, 0, 1)
+            clean_tensor = torch.from_numpy(clean_array).permute(2, 0, 1)
+
+            metadata = {
+                "scene_name": scene_id,
+                "noisy_file": str(noisy_file.name),
+                "clean_file": str(clean_file.name),
+            }
+
+            test_samples.append((noisy_tensor, clean_tensor, metadata))
+
+            logger.info(
+                f"Loaded {scene_id}: noisy shape {noisy_tensor.shape}, clean shape {clean_tensor.shape}"
+            )
+
+            if len(test_samples) >= max_samples:
+                break
 
     logger.info(f"Loaded {len(test_samples)} test samples")
     return test_samples

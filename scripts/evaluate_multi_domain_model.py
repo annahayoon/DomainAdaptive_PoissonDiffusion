@@ -35,7 +35,7 @@ sys.path.insert(0, str(project_root))
 
 from core.logging_config import get_logger
 from models.edm_wrapper import EDMConfig, EDMModelWrapper, create_domain_edm_wrapper
-from poisson_training.utils import load_checkpoint
+from utils import load_checkpoint
 
 logger = get_logger(__name__)
 

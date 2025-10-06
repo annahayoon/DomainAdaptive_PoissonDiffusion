@@ -32,7 +32,6 @@ from core.baselines import BaselineComparator, create_baseline_suite
 from core.calibration import CalibrationParams, SensorCalibration
 from core.logging_config import setup_project_logging
 from core.metrics import EvaluationSuite
-from data.loaders import FormatDetector
 
 logger = setup_project_logging(level="INFO")
 
@@ -74,7 +73,6 @@ class BaselineEvaluationFramework:
         # Initialize components
         self.baseline_comparator = create_baseline_suite(device=self.device)
         self.evaluation_suite = EvaluationSuite(device=self.device)
-        self.format_detector = FormatDetector()
 
         # Initialize pre-trained diffusion models
         self._initialize_pretrained_models()
@@ -691,48 +689,13 @@ class BaselineEvaluationFramework:
                 clean_files = sorted(clean_dir.glob("*"))
 
                 for noisy_file, clean_file in zip(noisy_files, clean_files):
-                    try:
-                        # Load images using format detector
-                        noisy_data, noisy_metadata = self.format_detector.load_auto(
-                            noisy_file
-                        )
-                        clean_data, clean_metadata = self.format_detector.load_auto(
-                            clean_file
-                        )
-
-                        # Convert to tensors
-                        noisy_tensor = torch.from_numpy(noisy_data).float()
-                        clean_tensor = torch.from_numpy(clean_data).float()
-
-                        # Add batch dimension if needed
-                        if noisy_tensor.ndim == 2:
-                            noisy_tensor = noisy_tensor.unsqueeze(0).unsqueeze(0)
-                        elif noisy_tensor.ndim == 3:
-                            noisy_tensor = noisy_tensor.unsqueeze(0)
-
-                        if clean_tensor.ndim == 2:
-                            clean_tensor = clean_tensor.unsqueeze(0).unsqueeze(0)
-                        elif clean_tensor.ndim == 3:
-                            clean_tensor = clean_tensor.unsqueeze(0)
-
-                        # Metadata
-                        metadata = {
-                            "domain": domain,
-                            "noisy_file": str(noisy_file),
-                            "clean_file": str(clean_file),
-                            "scale": 1000.0,  # Default scale
-                            "background": 0.0,
-                            "read_noise": 5.0,
-                            "noisy_metadata": noisy_metadata,
-                            "clean_metadata": clean_metadata,
-                        }
-
-                        domain_data.append((noisy_tensor, clean_tensor, metadata))
-
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to load {noisy_file}, {clean_file}: {e}"
-                        )
+                    # Note: FormatDetector functionality removed
+                    # This script needs to be adapted for the current preprocessing pipeline
+                    print("WARNING: FormatDetector functionality removed.")
+                    print(
+                        "This script needs to be adapted for the current preprocessing pipeline."
+                    )
+                    continue
 
                 if domain_data:
                     real_data[domain] = domain_data

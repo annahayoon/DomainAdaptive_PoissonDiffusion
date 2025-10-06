@@ -16,8 +16,7 @@ import torch
 import yaml
 
 from core.guidance_factory import create_guidance_from_config
-from poisson_training.multi_domain_trainer import MultiDomainTrainer
-from poisson_training.utils import set_deterministic_mode
+from utils import set_deterministic_mode
 
 
 def load_config(config_path: str) -> dict:

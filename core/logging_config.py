@@ -276,7 +276,6 @@ class LoggingManager:
         self.configured = False
 
 
-# Global logging manager instance
 logging_manager = LoggingManager()
 
 
@@ -314,7 +313,6 @@ def get_logger(name: str) -> logging.Logger:
     return logging_manager.get_logger(name)
 
 
-# Context manager for temporary log level changes
 class temporary_log_level:
     """Context manager for temporarily changing log level."""
 

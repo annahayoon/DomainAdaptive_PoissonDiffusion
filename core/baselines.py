@@ -963,7 +963,12 @@ class L2GuidedDiffusionBaseline(BaselineMethod):
             # Model prediction
             with torch.no_grad():
                 sigma_batch = sigma_curr.expand(x.shape[0])
-                v = self.model(x, sigma_batch)
+                # Create condition tensor with domain parameters
+                # EDM expects: condition = [scale, read_noise, background] shape (B, 3)
+                condition = torch.tensor(
+                    [[scale, read_noise, background]], device=x.device, dtype=x.dtype
+                ).expand(x.shape[0], -1)
+                v = self.model(x, sigma_batch, condition=condition)
 
             # Denoised estimate
             x0 = x - sigma_curr * v
