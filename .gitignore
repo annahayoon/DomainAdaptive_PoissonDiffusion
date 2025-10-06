@@ -139,6 +139,18 @@ tensorboard_logs/
 evaluation_results/
 evaluation_results_*
 
+# Additional directories to ignore
+dataset/
+config/
+docs/
+htmlcov/
+notebooks/
+refactored_evaluation_results/
+results/
+savio_shellscript/
+sync/
+tests/
+
 # Data directories (usually large and not tracked)
 data/raw/
 data/processed/
