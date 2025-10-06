@@ -26,6 +26,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+.kiro
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -251,6 +252,8 @@ savio_job*.sh
 singleA40*.sh
 run_*gpu*.sh
 run_memory_optimized*.sh
+setup/*.sh
+scripts/
 
 # Temporary documentation files
 *_FIX*.md
