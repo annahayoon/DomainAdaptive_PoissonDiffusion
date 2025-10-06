@@ -1,0 +1,66 @@
+Loading datasets...
+Loading dataset...
+/home/jilab/miniconda3/lib/python3.12/site-packages/torch/utils/data/sampler.py:68: UserWarning: `data_source` argument is not used and will be removed in 2.2.0.You may still have custom implementation that utilizes it.
+  warnings.warn(
+Dataset: 12024 training samples
+         2610 validation samples
+Constructing network...
+
+EDMPrecond                Parameters  Buffers  Output shape        Datatype
+---                       ---         ---      ---                 ---
+model.map_noise           -           -        [5, 192]            float32
+model.map_layer0          148224      -        [5, 768]            float32
+model.map_layer1          590592      -        [5, 768]            float32
+model.map_label           2304        -        [5, 768]            float32
+model.enc.256x256_conv    5376        -        [5, 192, 256, 256]  float32
+model.enc.256x256_block0  960000      -        [5, 192, 256, 256]  float32
+model.enc.256x256_block1  960000      -        [5, 192, 256, 256]  float32
+model.enc.256x256_block2  960000      -        [5, 192, 256, 256]  float32
+model.enc.128x128_down    960000      8        [5, 192, 128, 128]  float32
+model.enc.128x128_block0  2657280     -        [5, 384, 128, 128]  float32
+model.enc.128x128_block1  3247104     -        [5, 384, 128, 128]  float32
+model.enc.128x128_block2  3247104     -        [5, 384, 128, 128]  float32
+model.enc.64x64_down      3247104     8        [5, 384, 64, 64]    float32
+model.enc.64x64_block0    6087360     -        [5, 576, 64, 64]    float32
+model.enc.64x64_block1    6861312     -        [5, 576, 64, 64]    float32
+model.enc.64x64_block2    6861312     -        [5, 576, 64, 64]    float32
+model.enc.32x32_down      6861312     8        [5, 576, 32, 32]    float32
+model.enc.32x32_block0    13282176    -        [5, 768, 32, 32]    float32
+model.enc.32x32_block1    14166528    -        [5, 768, 32, 32]    float32
+model.enc.32x32_block2    14166528    -        [5, 768, 32, 32]    float32
+model.dec.32x32_in0       14166528    -        [5, 768, 32, 32]    float32
+model.dec.32x32_in1       11802624    -        [5, 768, 32, 32]    float32
+model.dec.32x32_block0    20656896    -        [5, 768, 32, 32]    float32
+model.dec.32x32_block1    20656896    -        [5, 768, 32, 32]    float32
+model.dec.32x32_block2    20656896    -        [5, 768, 32, 32]    float32
+model.dec.32x32_block3    19181952    -        [5, 768, 32, 32]    float32
+model.dec.64x64_up        11802624    8        [5, 768, 64, 64]    float32
+model.dec.64x64_block0    11618880    -        [5, 576, 64, 64]    float32
+model.dec.64x64_block1    10512576    -        [5, 576, 64, 64]    float32
+model.dec.64x64_block2    10512576    -        [5, 576, 64, 64]    float32
+model.dec.64x64_block3    9406272     -        [5, 576, 64, 64]    float32
+model.dec.128x128_up      6861312     8        [5, 576, 128, 128]  float32
+model.dec.128x128_block0  5607936     -        [5, 384, 128, 128]  float32
+model.dec.128x128_block1  4870272     -        [5, 384, 128, 128]  float32
+model.dec.128x128_block2  4870272     -        [5, 384, 128, 128]  float32
+model.dec.128x128_block3  4132608     -        [5, 384, 128, 128]  float32
+model.dec.256x256_up      3247104     8        [5, 384, 256, 256]  float32
+model.dec.256x256_block0  1735104     -        [5, 192, 256, 256]  float32
+model.dec.256x256_block1  1366080     -        [5, 192, 256, 256]  float32
+model.dec.256x256_block2  1366080     -        [5, 192, 256, 256]  float32
+model.dec.256x256_block3  1366080     -        [5, 192, 256, 256]  float32
+model.out_norm            384         -        [5, 192, 256, 256]  float32
+model.out_conv            5187        -        [5, 3, 256, 256]    float32
+<top-level>               -           -        [5, 3, 256, 256]    float32
+---                       ---         ---      ---                 ---
+Total                     281674755   48       -                   -
+
+Setting up optimizer...
+Training for 300 kimg...
+
+tick 0     kimg 0.0       time 40s          sec/tick 18.1    sec/kimg 3620.91 maintenance 22.2   gpumem 44.07  gpu_cur 5.27   gpu_util 30 %
+Validation loss: 1.6576
+New best validation loss: 1.6576
+Saved checkpoint: results/edm_native_photography_20251006_064626/network-snapshot-000000.pkl
+Saved best model: results/edm_native_photography_20251006_064626/best_model.pkl
+tick 1     kimg 12.0      time 1h 10m 09s   sec/tick 4128.4  sec/kimg 344.04  maintenance 40.7   gpumem 43.49  gpu_cur 5.27   gpu_util 100%
