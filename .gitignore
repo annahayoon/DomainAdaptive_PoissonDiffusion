@@ -140,10 +140,13 @@ evaluation_results/
 evaluation_results_*
 
 # Additional directories to ignore
+checkpoints/
 dataset/
 config/
 docs/
+external/
 htmlcov/
+hpc_result/
 notebooks/
 refactored_evaluation_results/
 results/
