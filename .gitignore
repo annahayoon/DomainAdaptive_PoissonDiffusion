@@ -252,6 +252,7 @@ savio_job*.sh
 singleA40*.sh
 run_*gpu*.sh
 run_memory_optimized*.sh
+run_edm_native_train.sh
 setup/*.sh
 scripts/
 
