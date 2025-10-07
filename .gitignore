@@ -1,3 +1,7 @@
+# =============================================================================
+# Python Standard Ignores
+# =============================================================================
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -29,8 +33,6 @@ MANIFEST
 .kiro
 
 # PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
 
@@ -56,17 +58,21 @@ coverage.xml
 *.mo
 *.pot
 
-# Django stuff:
+# =============================================================================
+# Framework-specific Ignores
+# =============================================================================
+
+# Django stuff
 *.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
 
-# Flask stuff:
+# Flask stuff
 instance/
 .webassets-cache
 
-# Scrapy stuff:
+# Scrapy stuff
 .scrapy
 
 # Sphinx documentation
@@ -82,27 +88,17 @@ target/
 profile_default/
 ipython_config.py
 
+# =============================================================================
+# Environment and Virtual Environment
+# =============================================================================
+
 # pyenv
 .python-version
-
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-#Pipfile.lock
 
 # PEP 582; used by e.g. github.com/David-OConnor/pyflow
 __pypackages__/
 
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
+# Virtual environments
 .env
 .venv
 env/
@@ -110,6 +106,10 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+
+# =============================================================================
+# Development Tools
+# =============================================================================
 
 # Spyder project settings
 .spyderproject
@@ -129,7 +129,17 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# Project-specific ignores
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# =============================================================================
+# Project-specific Ignores
+# =============================================================================
+
 # Training outputs
 checkpoints/
 logs/
@@ -141,17 +151,18 @@ evaluation_results/
 evaluation_results_*
 
 # Additional directories to ignore
-checkpoints/
 dataset/
-config/
 docs/
 external/
 htmlcov/
 hpc_result/
 notebooks/
+old/
 refactored_evaluation_results/
 results/
 savio_shellscript/
+scripts/
+setup/
 sync/
 tests/
 
@@ -177,24 +188,25 @@ models/checkpoints/
 # Temporary files
 *.tmp
 *.temp
-.DS_Store
-Thumbs.db
 
-# IDE files
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
+# =============================================================================
+# OS Generated Files
+# =============================================================================
 
-# OS generated files
+# macOS
 .DS_Store
 .DS_Store?
 ._*
 .Spotlight-V100
 .Trashes
+
+# Windows
 ehthumbs.db
 Thumbs.db
+
+# =============================================================================
+# System Files
+# =============================================================================
 
 # Profiling data
 *.prof
@@ -213,6 +225,10 @@ config/local.yaml
 mlruns/
 .mlflow/
 
+# =============================================================================
+# Large Files (for testing)
+# =============================================================================
+
 # Large image files for testing
 *.tiff
 *.tif
@@ -222,6 +238,10 @@ mlruns/
 *.arw
 test_images/large/
 
+# =============================================================================
+# Backup and Cache
+# =============================================================================
+
 # Backup files
 *.bak
 *.backup
@@ -229,32 +249,24 @@ test_images/large/
 
 # Cache directories
 .cache/
-__pycache__/
-.pytest_cache/
-.mypy_cache/
+
+# =============================================================================
+# Documentation and Build
+# =============================================================================
 
 # Documentation build
 docs/build/
-docs/_build/
 
-# Jupyter notebook outputs (keep notebooks but not outputs)
-*.ipynb_checkpoints/
+# =============================================================================
+# Temporary Project Files
+# =============================================================================
 
-# Virtual environment
-venv/
-env/
-.venv/
-.env/
-
-# Additional project-specific ignores
 # Training/job scripts (usually temporary)
 savio_job*.sh
 singleA40*.sh
 run_*gpu*.sh
 run_memory_optimized*.sh
 run_edm_native_train.sh
-setup/*.sh
-scripts/
 
 # Temporary documentation files
 *_FIX*.md

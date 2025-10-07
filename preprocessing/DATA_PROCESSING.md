@@ -1,20 +1,20 @@
 # Data Processing Pipeline Documentation
 
-**Updated: October 2025, Anna Yoon**
+**Updated: January 2025, Anna Yoon**
 
 ## Overview
 
-The system processes multi-domain imaging data (Photography, Microscopy, Astronomy) into unified **8-bit PNG tiles (256×256)** with domain-specific physics-based calibration, scene-based splitting, and complete metadata tracking using a **file-based pipeline**.
+The system processes multi-domain imaging data (Photography, Microscopy, Astronomy) into unified **float32 .npy tiles (256×256)** with domain-specific physics-based calibration, scene-based splitting, and complete metadata tracking using a **file-based pipeline**.
 
 ### Key Features
 
 - ✅ **Local file-based processing** - No Spark/Parquet/Delta Lake dependencies
 - ✅ **Domain-specific physics calibration** applied to full image BEFORE tiling
-- ✅ **8-bit PNG storage** with lossless compression (~2-4x space savings)
-- ✅ **Consistent bit depth** (8-bit) across all domains for cross-domain training
+- ✅ **Float32 .npy storage** with full precision preservation (~4x space savings vs raw)
+- ✅ **Consistent tile size** (256×256) across all domains for cross-domain training
 - ✅ **Camera-specific photography downsampling** with anti-aliasing
 - ✅ **Correct astronomy labels**: Direct image = clean, G800L grism = noisy
-- ✅ **Professional astronomy preprocessing** with astronomy_asinh scaling module
+- ✅ **Domain-specific fixed scaling** for EDM training compatibility
 - ✅ **Scene-based train/test/validation splitting** with no data leakage
 
 ---
@@ -37,14 +37,9 @@ The system processes multi-domain imaging data (Photography, Microscopy, Astrono
 
 ## Quick Start
 
-### Demo Mode (Recommended First)
-```bash
-cd /home/jilab/anna_OS_ML
-python process_tiles_pipeline.py --demo_mode
-```
-
 ### Test Run (Limited Files)
 ```bash
+cd /home/jilab/Jae/preprocessing
 python process_tiles_pipeline.py --max_files 3
 ```
 
@@ -54,10 +49,9 @@ python process_tiles_pipeline.py
 ```
 
 ### Expected Processing Time
-- **Demo mode**: ~1-2 minutes (calibration examples only)
 - **Test run** (3 files/domain): ~5-10 minutes
 - **Full run** (all files): ~2-4 hours
-- **Total output**: 78,806 tiles (39,403 clean + 39,403 noisy, perfect 1:1 mapping)
+- **Total output**: ~78,000+ tiles (clean + noisy pairs, perfect 1:1 mapping)
 
 ### Expected Tile Counts (1:1 Clean ↔ Noisy Mapping)
 - **Photography**: 17,106 clean + 17,106 noisy = 34,212 tiles
@@ -75,7 +69,7 @@ python process_tiles_pipeline.py
 
 ## Pipeline Architecture
 
-### Simple PNG Tiles Processing Flow
+### Simple .npy Tiles Processing Flow
 
 The pipeline processes images in the correct order for physics-based calibration:
 
@@ -93,23 +87,22 @@ The pipeline processes images in the correct order for physics-based calibration
    • Astronomy: HST instrument calibration
    • Formula: electrons = ADU × gain - read_noise
    ↓
-4. Apply domain-specific scaling for dynamic range compression
-   • Photography: Linear scaling
-   • Microscopy: Percentile-based for dark images
-   • Astronomy: Asinh scaling with percentile fallback
+4. Apply domain-specific FIXED scaling for EDM training compatibility
+   • Photography: Fixed scale 80,000 (99.9th %ile ≤ 1.0)
+   • Microscopy: Fixed scale 66,000 (99.9th %ile ≤ 1.0)
+   • Astronomy: Fixed scale 170 with +5.0 offset (99.9th %ile ≤ 1.0)
    ↓
-5. Normalize & Convert to 8-bit PNG [0, 255]
+5. Tile the calibrated float32 image into 256×256 patches
+   • Sony: Custom tiling (6×9 = 54 tiles)
+   • Fuji: Custom tiling (4×6 = 24 tiles)
+   • Microscopy: Custom tiling (4×4 = 16 tiles)
+   • Astronomy: Custom tiling (9×9 = 81 tiles)
    ↓
-6. Tile the calibrated 8-bit image into 256×256 PNG patches
-   • Custom tiling for Sony (2×4 = 8 tiles)
-   • Systematic tiling for Fuji (naturally achieves 4×6 = 24 tiles)
-   • Systematic tiling for microscopy/astronomy (0% overlap)
+6. Separate prior (clean) vs posterior (noisy)
    ↓
-7. Separate prior (clean) vs posterior (noisy)
+7. Assign train/test/validation splits (scene-aware)
    ↓
-8. Assign train/test/validation splits (scene-aware)
-   ↓
-9. Save PNG tiles with metadata
+8. Save float32 .npy tiles with metadata
 ```
 
 ---
@@ -140,7 +133,7 @@ PKL-DiffusionDenoising/data/raw/
 ### Processed Data Structure
 ```
 PKL-DiffusionDenoising/data/processed/
-├── png_tiles/              # 8-bit PNG tiles organized by domain and type
+├── npy_tiles/              # Float32 .npy tiles organized by domain and type
 │   ├── photography/
 │   │   ├── noisy/         # Noisy photography tiles
 │   │   └── clean/         # Clean photography tiles
@@ -150,7 +143,8 @@ PKL-DiffusionDenoising/data/processed/
 │   └── astronomy/
 │       ├── noisy/         # Noisy astronomy tiles
 │       └── clean/         # Clean astronomy tiles
-└── tiles_metadata.json    # Complete metadata for all tiles
+├── comprehensive_tiles_metadata.json    # Complete metadata for all tiles
+└── metadata_*_incremental.json         # Incremental saves per domain
 ```
 
 ---
@@ -164,7 +158,7 @@ PKL-DiffusionDenoising/data/processed/
 image, metadata = load_image(file_path)  # RAW ADU values
 
 # STEP 2: Apply camera-specific photography downsampling (with anti-aliasing)
-if domain == "photography" and self.downsample_photography:
+if domain == "photography":
     if file_path.endswith('.ARW'):
         image = _downsample_with_antialiasing(image, 2.0)  # Sony: 2848×4256 → 1424×2128
     elif file_path.endswith('.RAF'):
@@ -175,72 +169,59 @@ gain, read_noise, method = _get_physics_based_calibration(domain, metadata)
 calibrated_image = _apply_physics_calibration(image, gain, read_noise, domain)
 # Formula: electrons = (ADU × gain) - read_noise
 
-# STEP 4: Apply domain-specific scaling
+# STEP 4: Apply domain-specific FIXED scaling for EDM training compatibility
+fixed_scale = self.fixed_scales.get(domain, 1000.0)
+if domain == "astronomy":
+    # For astronomy: offset by read noise, then scale
+    scaled_image = (calibrated_image + 5.0) / fixed_scale
+else:
+    # For photography and microscopy: simple division by fixed scale
+    scaled_image = calibrated_image / fixed_scale
+
+# STEP 5: Tile the calibrated float32 image
 if domain == "photography":
-    # Linear scaling for photography
-    img_min, img_max = np.min(calibrated_image), np.max(calibrated_image)
-    scaled_image = (calibrated_image - img_min) / (img_max - img_min)
+    if file_path.endswith('.ARW'):
+        tiles = _extract_sony_tiles(scaled_image)  # 6×9 = 54 tiles
+    elif file_path.endswith('.RAF'):
+        tiles = _extract_fuji_tiles(scaled_image)  # 4×6 = 24 tiles
+elif domain == "microscopy":
+    tiles = _extract_microscopy_tiles(scaled_image)  # 4×4 = 16 tiles
 elif domain == "astronomy":
-    # Professional asinh scaling for astronomy (default)
-    try:
-        from astronomy_asinh_preprocessing import AstronomyAsinhPreprocessor
-        scaled_image = astro_preprocessor.preprocess_astronomy_image(calibrated_image)
-    except ImportError:
-        # Fallback to percentile-based scaling if module unavailable
-        p1, p99 = np.percentile(calibrated_image, [1, 99])
-        scaled_image = np.clip((calibrated_image - p1) / (p99 - p1), 0, 1)
-else:
-    # Percentile-based scaling for microscopy
-    p1, p99 = np.percentile(calibrated_image, [1, 99])
-    scaled_image = np.clip((calibrated_image - p1) / (p99 - p1), 0, 1)
+    tiles = _extract_astronomy_tiles(scaled_image)  # 9×9 = 81 tiles
 
-# STEP 5: Convert to 8-bit PNG
-image_8bit = np.clip(scaled_image * 255.0, 0, 255).astype(np.uint8)
-
-# STEP 6: Tile the 8-bit image
-if domain == "photography" and file_path.endswith('.ARW'):
-    # Custom Sony tiling (2×4 = 8 tiles)
-    tiles = _extract_sony_tiles(image_8bit)
-else:
-    # Systematic tiling for Fuji/microscopy/astronomy (0% overlap)
-    # Fuji: 1008×1508 → 4×6 = 24 tiles (systematic tiling naturally achieves this)
-    tiler = SystematicTiler(tile_size=256, overlap_ratio=0.0)
-    tiles = tiler.extract_tiles(image_8bit)
-
-# STEP 7-9: Classify, split, and save as PNG
+# STEP 6-8: Classify, split, and save as .npy
 for i, tile_info in enumerate(tiles):
     data_type = _determine_data_type(file_path, domain)  # clean/noisy
     scene_id = _get_scene_id(file_path, domain)
     split = _assign_split(scene_id, data_type)  # train/val/test
 
-    # Save as PNG file
+    # Save as .npy file
     tile_id = f"{domain}_{Path(file_path).stem}_tile_{i:04d}"
-    save_tile_as_png(tile_info.tile_data, tile_id, domain, data_type, gain, read_noise, method)
+    save_tile_as_npy(tile_info.tile_data, tile_id, domain, data_type, gain, read_noise, method)
 ```
 
 ---
 
 ## Domain-Specific Processing
 
-### Photography: Camera-Specific Downsampling + Linear Scaling
-- **Camera-specific downsampling with anti-aliasing**: Sony (2x), Fuji (1.96x) prevents aliasing artifacts
-- **Linear scaling**: `(x - min) / (max - min)` preserves original characteristics
+### Photography: Camera-Specific Downsampling + Fixed Scaling
+- **Camera-specific downsampling with anti-aliasing**: Sony (2x), Fuji (4x) prevents aliasing artifacts
+- **Fixed scaling**: Scale factor 80,000 ensures 99.9th percentile ≤ 1.0 for EDM training
 - **RGB demosaicing**: Basic RGGB → RGB conversion (no white balance)
-- **Appropriate for moderate dynamic ranges**
+- **Custom tiling**: Sony (6×9 = 54 tiles), Fuji (4×6 = 24 tiles)
 
-### Microscopy: Percentile-Based Scaling
+### Microscopy: Fixed Scaling
 - **No downsampling**: Preserves fine cellular details
-- **Percentile normalization**: Uses 1st-99th percentiles for dark images
+- **Fixed scaling**: Scale factor 66,000 ensures 99.9th percentile ≤ 1.0 for EDM training
 - **Handles very low signals**: Common in fluorescence microscopy
-- **Preserves biological structures**
+- **Custom tiling**: 4×4 = 16 tiles per image
 
-### Astronomy: Professional Asinh Scaling
+### Astronomy: Fixed Scaling with Offset
 - **No downsampling**: Preserves astronomical features
-- **Professional asinh scaling**: Uses `astronomy_asinh_preprocessing` module (default)
-- **Fallback percentile normalization**: For very dark astronomical images when module unavailable
+- **Fixed scaling with offset**: Scale factor 170 with +5.0 offset for negative values
 - **Handles extreme dynamic ranges**: From background noise to bright stars
-- **Preserves faint astronomical features**
-- **Cosmic ray detection and removal**: Integrated preprocessing step
+- **Custom tiling**: 9×9 = 81 tiles per image
+- **Correct labeling**: Direct image = clean, G800L grism = noisy
 
 ---
 
@@ -326,7 +307,7 @@ split_val = hash_val % 100  # Maps to 0-99
 
 ## Data Schema
 
-### PNG Tiles Metadata Schema
+### .npy Tiles Metadata Schema
 
 ```python
 {
@@ -339,8 +320,8 @@ split_val = hash_val % 100  # Maps to 0-99
     "data_type": str,                  # noisy/clean
     "split": str,                      # train/validation/test
 
-    # PNG file information
-    "png_path": str,                   # Path to PNG file
+    # .npy file information
+    "npy_path": str,                   # Path to .npy file
     "tile_size": int,                  # 256
     "channels": int,                   # 1 (grayscale) or 3 (RGB)
 
@@ -364,6 +345,17 @@ split_val = hash_val % 100  # Maps to 0-99
     # Processing metadata
     "source_file": str,                # Original source file path
     "processing_timestamp": str,       # ISO timestamp
+    "fixed_scale": float,              # Domain-specific fixed scale factor
+    "original_min": float,             # Original data range min
+    "original_max": float,             # Original data range max
+    "electron_min": float,             # Electron range min
+    "electron_max": float,             # Electron range max
+    "electron_mean": float,            # Electron range mean
+    "electron_std": float,             # Electron range std
+    "norm_min": float,                 # Normalized range min
+    "norm_max": float,                 # Normalized range max
+    "norm_mean": float,                # Normalized range mean
+    "norm_std": float,                 # Normalized range std
 }
 ```
 
@@ -371,12 +363,12 @@ split_val = hash_val % 100  # Maps to 0-99
 
 ```python
 {
-    "tile_id": "photography_00001_00_0_tile_0000",
+    "tile_id": "photography_sony_00001_00_0_tile_0000",
     "domain": "photography",
     "scene_id": "photo_00001",
     "data_type": "noisy",
     "split": "train",
-    "png_path": "/path/to/processed/png_tiles/photography/noisy/photography_00001_00_0_tile_0000.png",
+    "npy_path": "/path/to/processed/npy_tiles/photography/noisy/photography_sony_00001_00_0_tile_0000.npy",
     "tile_size": 256,
     "channels": 3,
     "gain": 2.1,
@@ -385,9 +377,20 @@ split_val = hash_val % 100  # Maps to 0-99
     "quality_score": 0.45,
     "valid_ratio": 1.0,
     "is_edge_tile": False,
-    "overlap_ratio": 0.0,
+    "overlap_ratio": 0.09,
     "source_file": "/path/to/raw/SID/Sony/short/00001_00_0.04s.ARW",
-    "processing_timestamp": "2024-12-19T10:30:45.123456"
+    "processing_timestamp": "2025-01-07T10:30:45.123456",
+    "fixed_scale": 80000.0,
+    "original_min": 0.0,
+    "original_max": 16383.0,
+    "electron_min": -6.0,
+    "electron_max": 34404.3,
+    "electron_mean": 1050.2,
+    "electron_std": 1250.8,
+    "norm_min": 0.0,
+    "norm_max": 0.43,
+    "norm_mean": 0.013,
+    "norm_std": 0.016
 }
 ```
 
@@ -403,11 +406,11 @@ import pandas as pd
 from PIL import Image
 
 # Load processed tiles metadata
-with open("PKL-DiffusionDenoising/data/processed/tiles_metadata.json", 'r') as f:
+with open("PKL-DiffusionDenoising/data/processed/comprehensive_tiles_metadata.json", 'r') as f:
     tiles_metadata = json.load(f)
 
 # Convert to DataFrame
-tiles_df = pd.DataFrame(tiles_metadata)
+tiles_df = pd.DataFrame(tiles_metadata['tiles'])
 
 # Split by split field
 train = tiles_df[tiles_df['split'] == 'train']
@@ -434,24 +437,32 @@ print(f"Val: {len(val)/total:.1%}")
 print(f"Test: {len(test)/total:.1%}")
 ```
 
-### Step 3: Load PNG Tiles
+### Step 3: Load .npy Tiles
 
 ```python
-def load_png_tile(png_path):
-    """Load PNG tile and convert to tensor"""
-    image = Image.open(png_path)
-    if image.mode == 'L':  # Grayscale
-        tensor = torch.from_numpy(np.array(image)).float() / 255.0
-        tensor = tensor.unsqueeze(0)  # Add channel dimension
-    elif image.mode == 'RGB':  # RGB
-        tensor = torch.from_numpy(np.array(image)).float() / 255.0
-        tensor = tensor.permute(2, 0, 1)  # HWC -> CHW
+import numpy as np
+import torch
+
+def load_npy_tile(npy_path):
+    """Load .npy tile and convert to tensor"""
+    tile_data = np.load(npy_path)  # Shape: (C, H, W) or (H, W)
+
+    if len(tile_data.shape) == 2:  # Grayscale (H, W)
+        tensor = torch.from_numpy(tile_data).float()
+        tensor = tensor.unsqueeze(0)  # Add channel dimension -> (1, H, W)
+    elif len(tile_data.shape) == 3:  # RGB (C, H, W)
+        tensor = torch.from_numpy(tile_data).float()
+    else:
+        raise ValueError(f"Unexpected tile shape: {tile_data.shape}")
+
     return tensor
 
 # Example usage
 tile = train.iloc[0]
-tile_data = load_png_tile(tile['png_path'])  # Load from PNG file
+tile_data = load_npy_tile(tile['npy_path'])  # Load from .npy file
 print(f"Tile shape: {tile_data.shape}")  # [C, H, W]
+print(f"Tile dtype: {tile_data.dtype}")  # torch.float32
+print(f"Tile range: [{tile_data.min():.3f}, {tile_data.max():.3f}]")
 ```
 
 ### Step 4: PyTorch Dataset
@@ -470,8 +481,8 @@ class DiffusionTileDataset(Dataset):
     def __getitem__(self, idx):
         row = self.tiles.iloc[idx]
 
-        # Load PNG tile
-        tile_data = load_png_tile(row['png_path'])
+        # Load .npy tile
+        tile_data = load_npy_tile(row['npy_path'])
 
         return {
             'image': tile_data,
@@ -491,29 +502,17 @@ train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 
 ## Verification
 
-### Verify Pipeline Configuration
-
-```bash
-python process_tiles_pipeline.py --demo_mode
-# Will show:
-# 🎯 DOMAIN-SPECIFIC CALIBRATION DEMONSTRATION
-# 📊 Photography: Camera sensor calibration (Gain: 5.0 e-/ADU, Read noise: 3.6 e-)
-# 📊 Microscopy: sCMOS detector calibration (Gain: 1.0 e-/ADU, Read noise: 1.5 e-)
-# 📊 Astronomy: HST instrument calibration (Gain: 1.0 e-/ADU, Read noise: 3.5 e-)
-# ✅ DEMONSTRATION COMPLETE
-```
-
-### Verify PNG Tiles Generation
+### Verify .npy Tiles Generation
 
 ```bash
 python process_tiles_pipeline.py --max_files 3
 # Will show:
-# 🚀 Starting Simple PNG Tiles Pipeline
+# 🚀 Starting .npy Tiles Pipeline
 # 📷 Found X photography files
 # 🔬 Found Y microscopy files
 # 🌟 Found Z astronomy files
-# ✅ Generated N PNG tiles from each domain
-# 💾 Metadata saved to: tiles_metadata.json
+# ✅ Generated N .npy tiles from each domain
+# 💾 Metadata saved to: comprehensive_tiles_metadata.json
 ```
 
 ### Verify Split Distribution
@@ -523,10 +522,10 @@ import json
 import pandas as pd
 
 # Load metadata
-with open("PKL-DiffusionDenoising/data/processed/tiles_metadata.json", 'r') as f:
+with open("PKL-DiffusionDenoising/data/processed/comprehensive_tiles_metadata.json", 'r') as f:
     tiles_metadata = json.load(f)
 
-tiles_df = pd.DataFrame(tiles_metadata)
+tiles_df = pd.DataFrame(tiles_metadata['tiles'])
 
 # Check split distribution
 print("📊 Split Distribution:")
@@ -546,29 +545,29 @@ print(tiles_df['domain'].value_counts())
 ## File Reference
 
 ### Main Pipeline Files
-- `process_tiles_pipeline.py` - Main simple PNG tiles pipeline with domain-specific calibration
+- `process_tiles_pipeline.py` - Main .npy tiles pipeline with domain-specific calibration
 - `domain_processors.py` - Domain-specific image processors
 - `complete_systematic_tiling.py` - Systematic tiling implementation
-- `astronomy_asinh_preprocessing.py` - Astronomy preprocessing module
 - `physics_based_calibration.py` - Physics-based calibration utilities
-- `visualize_calibration_standalone.py` - Calibration visualization tools
 
 ### Output Directories
-- `PKL-DiffusionDenoising/data/processed/png_tiles/` - PNG tiles organized by domain/type
-- `PKL-DiffusionDenoising/data/processed/tiles_metadata.json` - Complete metadata
+- `PKL-DiffusionDenoising/data/processed/npy_tiles/` - .npy tiles organized by domain/type
+- `PKL-DiffusionDenoising/data/processed/comprehensive_tiles_metadata.json` - Complete metadata
+- `PKL-DiffusionDenoising/data/processed/metadata_*_incremental.json` - Incremental saves
 
 ### Key Methods in Pipeline
-- `run_png_tiles_pipeline()` - Main pipeline execution method
-- `process_file_to_png_tiles()` - Individual file processing method
-- `process_single_file_to_tiles()` - Alternative single file processing method
+- `run_npy_tiles_pipeline()` - Main pipeline execution method
+- `process_file_to_npy_tiles()` - Individual file processing method
 - `_get_physics_based_calibration()` - Domain-specific calibration
 - `_apply_physics_calibration()` - Physics-based calibration implementation
 - `_downsample_with_antialiasing()` - Camera-specific photography downsampling
-- `_extract_sony_tiles()` - Custom Sony tiling (2×4 grid)
+- `_extract_sony_tiles()` - Custom Sony tiling (6×9 grid)
+- `_extract_fuji_tiles()` - Custom Fuji tiling (4×6 grid)
+- `_extract_microscopy_tiles()` - Custom microscopy tiling (4×4 grid)
+- `_extract_astronomy_tiles()` - Custom astronomy tiling (9×9 grid)
 - `_assign_split()` - Scene-aware train/test/validation splitting
 - `demosaic_rggb_to_rgb()` - Basic demosaicing for photography
-- `save_tile_as_png()` - PNG tile saving with metadata
-- `run_domain_calibration_demo()` - Demo mode for calibration examples
+- `save_tile_as_npy()` - .npy tile saving with metadata
 
 ---
 
@@ -576,6 +575,6 @@ print(tiles_df['domain'].value_counts())
 
 For issues or questions about the pipeline:
 1. Run demo mode to verify calibration parameters
-2. Check PNG tiles in output directory
+2. Check .npy tiles in output directory
 3. Review JSON metadata for processing details
 4. Verify input data structure matches expected format

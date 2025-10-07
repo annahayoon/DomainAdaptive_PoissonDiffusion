@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
-Train photography restoration model using EDM's native training code.
+Train restoration model using EDM's native training code with FLOAT32 .npy files.
 
-This script uses EDM's native utilities and follows EDM's training structure closely:
+This script uses EDM's native utilities with 32-bit float .npy files (NO QUANTIZATION):
 - Uses torch_utils.distributed for distributed training
 - Uses torch_utils.training_stats for metrics tracking
 - Uses torch_utils.misc for model utilities (EMA, checkpointing, etc.)
 - Uses dnnlib.util for general utilities
 - Follows EDM's training_loop.py structure
 
-Key Features:
-- Architecture: arch=adm (DhariwalUNet)
-- Preconditioning: precond=edm (EDMPrecond + EDMLoss)
-- Uses EDM's native EDMLoss function
-- Loads data from png_dataset.py with calibration info
-- One-hot domain encoding [1, 0, 0] for photography
-- Native EDM training loop structure
+Key Differences from PNG training:
+- Loads 32-bit float .npy files instead of 8-bit PNG
+- NO quantization loss - preserves full precision
+- Data is in [0, ~1] normalized range from pipeline's fixed scaling:
+  * Photography: ADU * gain / 80000.0
+  * Microscopy: ADU * gain / 66000.0
+  * Astronomy: (ADU * gain + 5.0) / 170.0
+- Float32 throughout the pipeline
+- Training normalizes to [-1, 1] for EDM
 """
 
 import argparse
@@ -41,8 +43,8 @@ sys.path.insert(0, str(edm_path))
 # Import EDM native components
 import external.edm.dnnlib
 
-# Import our dataset
-from data.png_dataset import create_edm_png_datasets
+# Import our NPY dataset
+from data.npy_dataset import create_edm_npy_datasets
 from external.edm.torch_utils import distributed as dist
 from external.edm.torch_utils import misc, training_stats
 from external.edm.training.loss import EDMLoss
@@ -63,21 +65,33 @@ def training_loop(
     ema_halflife_kimg=500,
     lr_rampup_kimg=1000,
     kimg_per_tick=50,
-    snapshot_ticks=10,  # Save every 10 ticks (500 kimg with default tick)
-    early_stopping_patience=5,  # Stop if no improvement for N validation checks
+    snapshot_ticks=10,
+    early_stopping_patience=5,
     device=torch.device("cuda"),
+    resume_state=None,
+    start_kimg=0,
 ):
     """
-    Main training loop following EDM's structure.
+    Main training loop for float32 .npy data following EDM's structure.
 
-    This closely follows external/edm/training/training_loop.py but adapted
-    for our PNG dataset and photography domain.
+    CRITICAL: This handles float32 data directly, NOT uint8!
+    Data is expected to be in [0, ~1] range from the pipeline's fixed scaling:
+    - Photography: scaled by 80000.0
+    - Microscopy: scaled by 66000.0
+    - Astronomy: (calibrated + 5.0) / 170.0
+
+    The training loop will normalize to [-1, 1] for EDM as needed.
     """
     # Initialize
     start_time = time.time()
     np.random.seed((seed * dist.get_world_size() + dist.get_rank()) % (1 << 31))
     torch.manual_seed(np.random.randint(1 << 31))
     torch.backends.cudnn.benchmark = True
+
+    # Fresh start - will be updated if resuming
+    cur_nimg = 0
+    cur_tick = 0
+    tick_start_nimg = 0
 
     # Select batch size per GPU
     batch_gpu_total = batch_size // dist.get_world_size()
@@ -105,8 +119,9 @@ def training_loop(
         )
     )
 
-    dist.print0(f"Dataset: {len(train_dataset)} training samples")
-    dist.print0(f"         {len(val_dataset)} validation samples")
+    dist.print0(f"Dataset: {len(train_dataset)} training samples (float32 .npy)")
+    dist.print0(f"         {len(val_dataset)} validation samples (float32 .npy)")
+    dist.print0(f"         Data already scaled to [0, ~1] by pipeline's fixed scaling")
 
     # Construct network using EDM's pattern
     dist.print0("Constructing network...")
@@ -124,12 +139,25 @@ def training_loop(
             labels = torch.zeros([batch_gpu, net.label_dim], device=device)
             misc.print_module_summary(net, [images, sigma, labels], max_nesting=2)
 
-    # Setup optimizer using EDM's pattern
+    # Setup optimizer and loss using EDM's pattern
     dist.print0("Setting up optimizer...")
-    loss_fn = external.edm.dnnlib.util.construct_class_by_name(**loss_kwargs)
+
+    # Create/restore loss function
+    if resume_state is not None and "loss_fn" in resume_state:
+        loss_fn = resume_state["loss_fn"]
+        dist.print0("Restored loss function from checkpoint")
+    else:
+        loss_fn = external.edm.dnnlib.util.construct_class_by_name(**loss_kwargs)
+
+    # Create optimizer
     optimizer = external.edm.dnnlib.util.construct_class_by_name(
         params=net.parameters(), **optimizer_kwargs
     )
+
+    # Restore optimizer state if resuming
+    if resume_state is not None and "optimizer_state" in resume_state:
+        optimizer.load_state_dict(resume_state["optimizer_state"])
+        dist.print0("Restored optimizer state from checkpoint")
 
     # Wrap with DDP if using distributed training
     if dist.get_world_size() > 1:
@@ -138,39 +166,65 @@ def training_loop(
         ddp = net
 
     # Create EMA model using EDM's pattern
-    ema = copy.deepcopy(net).eval().requires_grad_(False)
+    if resume_state is not None and "ema" in resume_state:
+        ema = resume_state["ema"].to(device)
+        dist.print0("Restored EMA model from checkpoint")
+
+        # Calculate current training state
+        cur_nimg = start_kimg * 1000
+        cur_tick = cur_nimg // (kimg_per_tick * 1000)
+        tick_start_nimg = cur_tick * kimg_per_tick * 1000
+
+        dist.print0(
+            f"Checkpoint loaded - continuing from {start_kimg} kimg (tick {cur_tick})"
+        )
+        dist.print0(
+            f"Remaining: {total_kimg - start_kimg} kimg to reach {total_kimg} kimg"
+        )
+    else:
+        ema = copy.deepcopy(net).eval().requires_grad_(False)
 
     # Training loop following EDM's structure
-    dist.print0(f"Training for {total_kimg} kimg...")
+    remaining_kimg = total_kimg - start_kimg
+    if resume_state is not None:
+        dist.print0(
+            f"Training for remaining {remaining_kimg} kimg (to reach {total_kimg} kimg)..."
+        )
+    else:
+        dist.print0(f"Training for {total_kimg} kimg...")
     dist.print0()
-    cur_nimg = 0
-    cur_tick = 0
-    tick_start_nimg = cur_nimg
+
     tick_start_time = time.time()
     maintenance_time = tick_start_time - start_time
     dist.update_progress(cur_nimg // 1000, total_kimg)
     stats_jsonl = None
     best_val_loss = float("inf")
-    patience_counter = 0  # Track epochs without improvement for early stopping
+    patience_counter = 0
 
     while True:
         # Accumulate gradients
         optimizer.zero_grad(set_to_none=True)
         for round_idx in range(num_accumulation_rounds):
             with misc.ddp_sync(ddp, (round_idx == num_accumulation_rounds - 1)):
-                # Get batch using EDM's native interface
-                # The dataset automatically returns (images, labels) where:
-                # - images are uint8 in [0, 255] range, shape (N, C, H, W)
-                # - labels are float32 conditioning labels
+                # Get batch - returns float32 arrays in [0, ~1] range from pipeline
                 images, labels = next(dataset_iterator)
 
                 # Move to device
                 images = images.to(device)
                 labels = labels.to(device)
 
-                # Normalize images to [-1, 1] (EDM format)
-                # EDM expects float32 images in [-1, 1] range
-                images = images.to(torch.float32) / 127.5 - 1
+                # CRITICAL: Handle float32 data properly
+                # Pipeline already scaled to [0, ~1] using domain-specific fixed scales:
+                # - Photography: ADU * gain / 80000.0
+                # - Microscopy: ADU * gain / 66000.0
+                # - Astronomy: (ADU * gain + 5.0) / 170.0
+
+                # Convert to float32 if not already
+                images = images.to(torch.float32)
+
+                # Normalize to [-1, 1] range for EDM
+                # Since pipeline data is in [0, ~1], we scale: x * 2 - 1
+                images = images * 2.0 - 1.0
 
                 # Compute loss using EDM's native loss
                 loss = loss_fn(net=ddp, images=images, labels=labels, augment_pipe=None)
@@ -237,18 +291,6 @@ def training_loop(
             fields += [f"gpu_cur {current_mem_gb:<6.2f}"]
             torch.cuda.reset_peak_memory_stats()
 
-            # Additional GPU utilization info if available
-            try:
-                gpu_utilization = (
-                    torch.cuda.utilization(device)
-                    if hasattr(torch.cuda, "utilization")
-                    else 0
-                )
-                if gpu_utilization > 0:
-                    fields += [f"gpu_util {gpu_utilization:<3.0f}%"]
-            except:
-                pass
-
         dist.print0(" ".join(fields))
 
         # Save network snapshot using EDM's format
@@ -261,7 +303,7 @@ def training_loop(
             is_best = val_loss < best_val_loss
             if is_best:
                 best_val_loss = val_loss
-                patience_counter = 0  # Reset patience counter on improvement
+                patience_counter = 0
                 dist.print0(f"New best validation loss: {val_loss:.4f}")
             else:
                 patience_counter += 1
@@ -275,10 +317,15 @@ def training_loop(
                         f"Early stopping triggered after {patience_counter} checks without improvement"
                     )
                     dist.print0(f"Best validation loss: {best_val_loss:.4f}")
-                    done = True  # Trigger loop exit
+                    done = True
 
-            # Save checkpoint (EDM format)
-            data = dict(ema=ema, loss_fn=loss_fn, dataset_kwargs=dict())
+            # Save checkpoint
+            data = dict(
+                ema=ema,
+                loss_fn=loss_fn,
+                optimizer_state=optimizer.state_dict(),
+                dataset_kwargs=dict(),
+            )
             for key, value in data.items():
                 if isinstance(value, torch.nn.Module):
                     value = copy.deepcopy(value).eval().requires_grad_(False)
@@ -304,21 +351,30 @@ def training_loop(
 
             del data
 
-        # Update logs using EDM's training_stats
-        training_stats.default_collector.update()
-        if dist.get_rank() == 0:
-            if stats_jsonl is None:
-                stats_jsonl = open(os.path.join(run_dir, "stats.jsonl"), "at")
-            stats_jsonl.write(
-                json.dumps(
-                    dict(
-                        training_stats.default_collector.as_dict(),
-                        timestamp=time.time(),
+        # Update logs
+        try:
+            training_stats.default_collector.update()
+            if dist.get_rank() == 0:
+                if stats_jsonl is None:
+                    stats_jsonl = open(os.path.join(run_dir, "stats.jsonl"), "at")
+                stats_jsonl.write(
+                    json.dumps(
+                        dict(
+                            training_stats.default_collector.as_dict(),
+                            timestamp=time.time(),
+                        )
                     )
+                    + "\n"
                 )
-                + "\n"
-            )
-            stats_jsonl.flush()
+                stats_jsonl.flush()
+        except Exception as e:
+            dist.print0(f"ERROR in logging: {e}")
+            if dist.get_rank() == 0 and stats_jsonl is not None:
+                try:
+                    stats_jsonl.close()
+                except:
+                    pass
+                stats_jsonl = None
         dist.update_progress(cur_nimg // 1000, total_kimg)
 
         # Update state
@@ -337,15 +393,14 @@ def training_loop(
 
 @torch.no_grad()
 def validate(ema_model, val_dataset, loss_fn, device):
-    """Run validation using EDM's native interface."""
+    """Run validation with float32 .npy data in [0, ~1] range from pipeline."""
     ema_model.eval()
 
-    # Use EDM's native dataset interface
     val_sampler = misc.InfiniteSampler(
         dataset=val_dataset,
         rank=dist.get_rank(),
         num_replicas=dist.get_world_size(),
-        seed=42,  # Fixed seed for validation
+        seed=42,
     )
     val_iterator = iter(
         torch.utils.data.DataLoader(
@@ -360,18 +415,19 @@ def validate(ema_model, val_dataset, loss_fn, device):
     total_loss = 0.0
     num_batches = 0
 
-    # Run validation for a fixed number of batches
-    for _ in range(min(50, len(val_dataset) // 4)):  # Validate on up to 50 batches
+    for _ in range(min(50, len(val_dataset) // 4)):
         try:
-            # Get batch using EDM's native interface
+            # Get batch - float32 data in [0, ~1] from pipeline
             images, labels = next(val_iterator)
 
             # Move to device
             images = images.to(device)
             labels = labels.to(device)
 
-            # Normalize images to [-1, 1] (EDM format)
-            images = images.to(torch.float32) / 127.5 - 1
+            # Convert to float32 and normalize to [-1, 1]
+            # Pipeline data is in [0, ~1], scale to [-1, 1] for EDM
+            images = images.to(torch.float32)
+            images = images * 2.0 - 1.0
 
             # Compute loss
             loss = loss_fn(
@@ -387,9 +443,23 @@ def validate(ema_model, val_dataset, loss_fn, device):
 
 
 def main():
-    """Main training function using EDM's pattern."""
+    """Main training function for float32 .npy data.
+
+    The training script expects .npy files that have been processed by the pipeline with:
+    - Domain-specific physics calibration (ADU → electrons)
+    - Fixed scaling to [0, ~1] range:
+      * Photography: electrons / 80000.0
+      * Microscopy: electrons / 66000.0
+      * Astronomy: (electrons + 5.0) / 170.0
+    - Metadata JSON with splits, calibration parameters, and scaling info
+
+    The training loop will:
+    1. Load float32 .npy data in [0, ~1] range
+    2. Normalize to [-1, 1] for EDM: x * 2 - 1
+    3. Train the diffusion model with full precision (no quantization)
+    """
     parser = argparse.ArgumentParser(
-        description="Train photography model with EDM native training"
+        description="Train model with EDM native training using float32 .npy files (NO QUANTIZATION)"
     )
 
     # Data arguments
@@ -397,13 +467,13 @@ def main():
         "--data_root",
         type=str,
         required=True,
-        help="Path to photography data directory (PNG tiles)",
+        help="Path to data directory containing .npy tiles",
     )
     parser.add_argument(
         "--metadata_json",
         type=str,
         required=True,
-        help="Path to metadata JSON file with splits",
+        help="Path to metadata JSON file with splits and calibration info",
     )
 
     # Training arguments
@@ -430,22 +500,28 @@ def main():
         "--early_stopping_patience",
         type=int,
         default=5,
-        help="Early stopping patience (validation checks without improvement)",
+        help="Early stopping patience",
     )
 
-    # Model arguments (ADM architecture defaults)
+    # Model arguments
     parser.add_argument(
         "--img_resolution", type=int, default=256, help="Image resolution"
     )
     parser.add_argument(
-        "--model_channels", type=int, default=192, help="Model channels (ADM default)"
+        "--channels",
+        type=int,
+        default=3,
+        help="Number of image channels (1 for grayscale, 3 for RGB)",
+    )
+    parser.add_argument(
+        "--model_channels", type=int, default=192, help="Model channels"
     )
     parser.add_argument(
         "--channel_mult",
         type=int,
         nargs="+",
         default=[1, 2, 3, 4],
-        help="Channel multipliers (ADM default)",
+        help="Channel multipliers",
     )
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
 
@@ -453,8 +529,14 @@ def main():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="results/edm_native_training",
+        default="results/edm_npy_training",
         help="Output directory",
+    )
+    parser.add_argument(
+        "--resume_from",
+        type=str,
+        default=None,
+        help="Resume training from checkpoint file",
     )
 
     # Device arguments
@@ -465,7 +547,7 @@ def main():
 
     args = parser.parse_args()
 
-    # Initialize distributed training using EDM's utility
+    # Initialize distributed training
     dist.init()
 
     # Setup output directory
@@ -473,41 +555,40 @@ def main():
     if dist.get_rank() == 0:
         os.makedirs(run_dir, exist_ok=True)
         dist.print0("=" * 60)
-        dist.print0("EDM NATIVE TRAINING FOR PHOTOGRAPHY")
+        dist.print0("EDM NATIVE TRAINING WITH FLOAT32 .NPY FILES")
+        dist.print0("NO QUANTIZATION - FULL PRECISION")
         dist.print0("=" * 60)
 
-    # Setup logging using EDM's Logger
+    # Setup logging
     if dist.get_rank() == 0:
         log_file = os.path.join(run_dir, "log.txt")
         logger = external.edm.dnnlib.util.Logger(
             file_name=log_file, file_mode="a", should_flush=True
         )
 
-    # Create datasets using EDM-compatible interface
-    dist.print0("Loading datasets...")
+    # Create datasets
+    dist.print0("Loading float32 .npy datasets...")
     dataset_kwargs = dict(
-        class_name="data.png_dataset.EDMPNGDataset",
+        class_name="data.npy_dataset.EDMNPYDataset",
         data_root=args.data_root,
         metadata_json=args.metadata_json,
-        split="train",  # This will be overridden for validation
+        split="train",
         image_size=args.img_resolution,
-        channels=3,
-        domain=None,  # Auto-detect from metadata
+        channels=args.channels,
+        domain="photography",  # Specify domain explicitly for comprehensive metadata files
         use_labels=True,
-        label_dim=3,  # One-hot domain encoding for 3 domains
-        max_size=None,  # No artificial limit
+        label_dim=3,
+        data_range="normalized",  # Pipeline outputs [0, ~1] scaled data
+        max_size=None,
     )
 
-    # Create training dataset using EDM's constructor
+    # Create datasets
     train_dataset = external.edm.dnnlib.util.construct_class_by_name(**dataset_kwargs)
-
-    # Create validation dataset
     val_dataset_kwargs = dataset_kwargs.copy()
     val_dataset_kwargs["split"] = "validation"
-    val_dataset_kwargs["max_size"] = None  # Use 20% for validation (handled internally)
     val_dataset = external.edm.dnnlib.util.construct_class_by_name(**val_dataset_kwargs)
 
-    # Configure network using EDM's pattern (using dataset properties)
+    # Configure network
     network_kwargs = external.edm.dnnlib.EasyDict(
         class_name="external.edm.training.networks.EDMPrecond",
         img_resolution=train_dataset.resolution,
@@ -517,12 +598,12 @@ def main():
         sigma_min=0.002,
         sigma_max=80.0,
         sigma_data=0.5,
-        model_type="DhariwalUNet",  # ADM architecture
+        model_type="DhariwalUNet",
         model_channels=args.model_channels,
         channel_mult=args.channel_mult,
     )
 
-    # Configure loss using EDM's pattern
+    # Configure loss
     loss_kwargs = external.edm.dnnlib.EasyDict(
         class_name="external.edm.training.loss.EDMLoss",
         P_mean=-1.2,
@@ -530,7 +611,7 @@ def main():
         sigma_data=0.5,
     )
 
-    # Configure optimizer using EDM's pattern
+    # Configure optimizer
     optimizer_kwargs = external.edm.dnnlib.EasyDict(
         class_name="torch.optim.Adam",
         lr=args.lr,
@@ -540,6 +621,33 @@ def main():
 
     # Setup device
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+
+    # Resume from checkpoint if specified
+    resume_state = None
+    start_kimg = 0
+    checkpoint_path = args.resume_from
+
+    if checkpoint_path is None:
+        # Auto-find latest checkpoint
+        checkpoint_dir = args.output_dir
+        if os.path.exists(checkpoint_dir):
+            checkpoint_files = [
+                f
+                for f in os.listdir(checkpoint_dir)
+                if f.startswith("network-snapshot-") and f.endswith(".pkl")
+            ]
+            if checkpoint_files:
+                checkpoint_files.sort(key=lambda x: int(x.split("-")[2].split(".")[0]))
+                checkpoint_path = os.path.join(checkpoint_dir, checkpoint_files[-1])
+                dist.print0(f"Auto-resuming from: {checkpoint_path}")
+
+    if checkpoint_path is not None:
+        dist.print0(f"Loading checkpoint from {checkpoint_path}...")
+        with open(checkpoint_path, "rb") as f:
+            resume_state = pickle.load(f)  # nosec B301
+        checkpoint_name = os.path.basename(checkpoint_path)
+        start_kimg = int(checkpoint_name.split("-")[2].split(".")[0])
+        dist.print0(f"Resuming from {start_kimg} kimg")
 
     # Run training loop
     training_loop(
@@ -559,6 +667,8 @@ def main():
         snapshot_ticks=args.snapshot_ticks,
         early_stopping_patience=args.early_stopping_patience,
         device=device,
+        resume_state=resume_state,
+        start_kimg=start_kimg,
     )
 
     dist.print0("=" * 60)
