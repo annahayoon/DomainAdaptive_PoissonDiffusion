@@ -92,8 +92,18 @@ class SimpleTilesPipeline:
             "astronomy": 2.0,  # Astronomy: 4232×4220 → 2116×2110 → 9×9 = 81 tiles (maintains aspect ratio)
         }
 
-    def prepare_tile_data(self, tile_data: np.ndarray) -> Tuple[bytes, Dict[str, Any]]:
-        """Prepare tile data for storage as PNG (lossless compression, 8-bit for cross-domain consistency)"""
+        # Fixed scaling factors per domain (EDM-compatible, 99.9th %ile ≤ 1.0)
+        # Ensures 99.9% of pixels ≤ 1.0 for EDM training (prevents convergence issues)
+        self.fixed_scales = {
+            "astronomy": 170.0,  # 99.9th %ile = 168.3, ensures max ≤ 1.0 for EDM
+            "microscopy": 66000.0,  # 99.9th %ile = 65533.5, ensures max ≤ 1.0 for EDM
+            "photography": 80000.0,  # 99.9th %ile = 79351.4, ensures max ≤ 1.0 for EDM
+        }
+
+    def prepare_tile_data(
+        self, tile_data: np.ndarray
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Prepare tile data for storage as float32 .npy (preserves full precision)"""
 
         try:
             if len(tile_data.shape) == 2:
@@ -104,54 +114,25 @@ class SimpleTilesPipeline:
             original_shape = tile_data.shape
             channels = original_shape[0]
 
-            # Convert from float32 [0,1] to uint8 [0,255] for consistent 8-bit representation
-            # This ensures all domains (photography, microscopy, astronomy) have the same bit depth
-            # which is important for cross-domain training
-            tile_uint8 = np.clip(tile_data * 255.0, 0, 255).astype(np.uint8)
-
-            # Handle different channel configurations
-            if channels == 1:
-                # Grayscale image (microscopy, astronomy)
-                img_array = tile_uint8[0]
-                pil_image = Image.fromarray(img_array, mode="L")  # 8-bit grayscale
-            elif channels == 3:
-                # RGB image (photography)
-                img_array = tile_uint8.transpose(1, 2, 0)
-                pil_image = Image.fromarray(img_array, mode="RGB")  # 8-bit RGB
-
-            # Save to PNG in memory buffer
-            buffer = io.BytesIO()
-            pil_image.save(
-                buffer, format="PNG", compress_level=6
-            )  # 6 is balanced compression
-            png_bytes = buffer.getvalue()
-
             storage_info = {
-                "method": "png_lossless_8bit",
-                "original_size": tile_data.nbytes,
-                "stored_size": len(png_bytes),
-                "compression_ratio": tile_data.nbytes / len(png_bytes)
-                if len(png_bytes) > 0
-                else 1.0,
+                "method": "npy_float32",
+                "stored_size": tile_data.nbytes,
                 "shape": original_shape,
                 "dtype": str(tile_data.dtype),
-                "png_mode": pil_image.mode,
-                "png_bit_depth": 8,
                 "channels": channels,
             }
 
-            return png_bytes, storage_info
+            return tile_data, storage_info
 
         except Exception as e:
-            logger.error(f"PNG preparation failed: {e}")
+            logger.error(f"Tile preparation failed: {e}")
             logger.error(f"Traceback: {traceback.format_exc()}")
             error_info = {
                 "method": "failed",
-                "original_size": tile_data.nbytes if tile_data is not None else 0,
                 "stored_size": 0,
                 "error": str(e),
             }
-            return b"", error_info
+            return None, error_info
 
     def demosaic_rggb_to_rgb(
         self,
@@ -185,7 +166,7 @@ class SimpleTilesPipeline:
 
         return rgb_image
 
-    def save_tile_as_png(
+    def save_tile_as_npy(
         self,
         tile_data: np.ndarray,
         tile_id: str,
@@ -195,56 +176,70 @@ class SimpleTilesPipeline:
         read_noise: float,
         calibration_method: str,
     ) -> Dict[str, Any]:
-        """Save tile as PNG file and return metadata"""
-        try:
-            from PIL import Image
+        """Save tile as .npy file and return metadata
 
-            # Ensure proper shape and convert to uint8
+        Photography: Saves as RGB (3, 256, 256) float32
+        Microscopy: Saves as grayscale (1, 256, 256) float32
+        Astronomy: Saves as grayscale (1, 256, 256) float32
+        """
+        try:
+            # Ensure proper shape
             if len(tile_data.shape) == 2:
                 tile_data = tile_data[np.newaxis, :, :]
 
-            # Convert to uint8 [0,255]
-            tile_uint8 = np.clip(tile_data * 255.0, 0, 255).astype(np.uint8)
-
             # Create output directory
-            output_dir = self.base_path / "processed" / "png_tiles" / domain / data_type
+            output_dir = self.base_path / "processed" / "npy_tiles" / domain / data_type
             output_dir.mkdir(parents=True, exist_ok=True)
 
-            # Handle photography RGB data (already converted from RGGB)
-            if domain == "photography" and tile_uint8.shape[0] == 3:
-                # Photography data is already converted to RGB (3 channels)
-                img_array = tile_uint8.transpose(1, 2, 0)
-                pil_image = Image.fromarray(img_array, mode="RGB")
-                actual_channels = 3
-            elif domain == "photography" and tile_uint8.shape[0] == 4:
-                tile_float = tile_uint8.astype(np.float32) / 255.0
-                rgb_tile_float = self.demosaic_rggb_to_rgb(tile_float)
-                rgb_tile_uint8 = np.clip(rgb_tile_float * 255.0, 0, 255).astype(
-                    np.uint8
-                )
-                img_array = rgb_tile_uint8.transpose(1, 2, 0)
-                pil_image = Image.fromarray(img_array, mode="RGB")
-                actual_channels = 3
-            elif tile_uint8.shape[0] == 1:
-                img_array = tile_uint8[0]
-                pil_image = Image.fromarray(img_array, mode="L")
-                actual_channels = 1
-            elif tile_uint8.shape[0] == 3:
-                img_array = tile_uint8.transpose(1, 2, 0)
-                pil_image = Image.fromarray(img_array, mode="RGB")
-                actual_channels = 3
+            # Handle domain-specific channel requirements
+            if domain == "photography":
+                # Photography MUST be RGB (3 channels)
+                if tile_data.shape[0] == 3:
+                    # Already RGB
+                    actual_channels = 3
+                elif tile_data.shape[0] == 4:
+                    # Convert RGGB to RGB
+                    rgb_tile = self.demosaic_rggb_to_rgb(tile_data)
+                    tile_data = rgb_tile
+                    actual_channels = 3
+                else:
+                    raise ValueError(
+                        f"Photography tile has unexpected channels: {tile_data.shape[0]} "
+                        f"(expected 3 for RGB or 4 for RGGB)"
+                    )
+            elif domain == "microscopy" or domain == "astronomy":
+                # Microscopy and Astronomy MUST be grayscale (1 channel)
+                if tile_data.shape[0] == 1:
+                    actual_channels = 1
+                elif tile_data.shape[0] == 3:
+                    # Convert RGB to grayscale (shouldn't happen, but handle it)
+                    logger.warning(
+                        f"{domain.capitalize()} tile has 3 channels, converting to grayscale"
+                    )
+                    tile_data = np.mean(tile_data, axis=0, keepdims=True)
+                    actual_channels = 1
+                else:
+                    # Force to 1 channel
+                    tile_data = tile_data[0:1, :, :]
+                    actual_channels = 1
             else:
-                img_array = tile_uint8[0]
-                pil_image = Image.fromarray(img_array, mode="L")
-                actual_channels = 1
+                # Unknown domain - default to whatever it is
+                actual_channels = tile_data.shape[0]
 
-            png_path = output_dir / f"{tile_id}.png"
-            pil_image.save(png_path, format="PNG", compress_level=6)
+            # Final validation
+            expected_shape = (actual_channels, self.tile_size, self.tile_size)
+            if tile_data.shape != expected_shape:
+                raise ValueError(
+                    f"Tile shape mismatch for {domain}: {tile_data.shape} != {expected_shape}"
+                )
+
+            npy_path = output_dir / f"{tile_id}.npy"
+            np.save(npy_path, tile_data.astype(np.float32))
 
             # Return metadata
             return {
                 "tile_id": tile_id,
-                "png_path": str(png_path),
+                "npy_path": str(npy_path),
                 "domain": domain,
                 "data_type": data_type,
                 "gain": gain,
@@ -256,13 +251,13 @@ class SimpleTilesPipeline:
             }
 
         except Exception as e:
-            logger.error(f"Failed to save tile as PNG: {e}")
+            logger.error(f"Failed to save tile as .npy: {e}")
             return None
 
-    def process_file_to_png_tiles(
+    def process_file_to_npy_tiles(
         self, file_path: str, domain: str
     ) -> List[Dict[str, Any]]:
-        """Process a single file to PNG tiles with physics calibration - CORRECT FLOW: Calibrate→Convert→Tile"""
+        """Process a single file to .npy tiles with physics calibration and fixed scaling - CORRECT FLOW: Calibrate→FixedScale→Tile"""
         try:
             logger.info(f"Processing {domain} file: {Path(file_path).name}")
 
@@ -361,19 +356,11 @@ class SimpleTilesPipeline:
             orig_min = float(np.min(image))
             orig_max = float(np.max(image))
 
-            # Apply domain-specific calibration
-            if domain == "photography":
-                # Apply physics-based calibration: ADU → electrons (exact match)
-                calibrated_image = self._apply_physics_calibration(
-                    image, gain, read_noise, domain
-                )
-                # Physics calibration applied
-            else:
-                # Apply physics-based calibration: ADU → electrons → normalized
-                calibrated_image = self._apply_physics_calibration(
-                    image, gain, read_noise, domain
-                )
-                # Physics calibration applied
+            # Apply physics-based calibration: ADU → electrons
+            calibrated_image = self._apply_physics_calibration(
+                image, gain, read_noise, domain
+            )
+            # Physics calibration applied
 
             # Store electron range for physics analysis
             electron_min = float(np.min(calibrated_image))
@@ -381,167 +368,53 @@ class SimpleTilesPipeline:
             electron_mean = float(np.mean(calibrated_image))
             electron_std = float(np.std(calibrated_image))
 
-            # === STEP 3: Apply domain-specific scaling for dynamic range compression ===
-            if domain == "photography":
-                # For photography, use linear scaling (exact match to working script)
-                img_min, img_max = float(np.min(calibrated_image)), float(
-                    np.max(calibrated_image)
+            # === STEP 3: Apply domain-specific FIXED scaling ===
+            fixed_scale = self.fixed_scales.get(domain, 1000.0)
+
+            if domain == "astronomy":
+                # For astronomy: offset by read noise, then scale
+                # electron_mean~-3.5, so we add offset to center around 0
+                scaled_image = (calibrated_image + 5.0) / fixed_scale
+                logger.info(
+                    f"   ✅ Astronomy: fixed scaling with offset +5.0, scale {fixed_scale}"
                 )
-                if img_max > img_min:
-                    scaled_image = (calibrated_image - img_min) / (img_max - img_min)
-                else:
-                    scaled_image = np.clip(calibrated_image, 0, 1)
-                # Linear scaling applied
-            elif domain == "astronomy":
-                # Use professional astronomy asinh preprocessing
-                try:
-                    from astronomy_asinh_preprocessing import (
-                        AsinhScalingConfig,
-                        AstronomyAsinhPreprocessor,
-                    )
-
-                    # Create astronomy preprocessor with optimized config
-                    config = AsinhScalingConfig(
-                        softening_factor=1e-3,  # β parameter for asinh
-                        scale_percentile=99.5,  # Capture bright features
-                        background_percentile=10.0,  # Robust background estimation
-                        cosmic_ray_threshold=5.0,  # Detect cosmic rays
-                    )
-                    astro_preprocessor = AstronomyAsinhPreprocessor(config)
-
-                    # Prepare calibration parameters
-                    calibration_dict = {
-                        "gain": gain,
-                        "read_noise": read_noise,
-                        "background": 0.0,  # Will be estimated
-                        "scale_factor": None,  # Will be computed
-                    }
-
-                    # Apply professional astronomy preprocessing
-                    result = astro_preprocessor.preprocess_astronomy_image(
-                        calibrated_image,
-                        calibration_dict,
-                        apply_cosmic_ray_removal=True,
-                    )
-
-                    # Get the properly scaled image
-                    scaled_image = result["preprocessed_image"]
-                    preprocessing_metadata = result["preprocessing_metadata"]
-
-                    # Update calibration method to reflect professional preprocessing
-                    calibration_method = "astronomy_asinh"
-
-                    logger.info(f"✅ Applied professional astronomy asinh scaling")
-
-                except ImportError:
-                    # Fallback to simple astronomical scaling if module not available
-                    logger.warning(
-                        "⚠️ astronomy_asinh_preprocessing module not available, using fallback"
-                    )
-                    image_flat = calibrated_image.flatten()
-                    image_flat = image_flat[image_flat > 0]
-
-                    if len(image_flat) > 0:
-                        p1 = np.percentile(image_flat, 1)
-                        softening = max(p1, 1e-6)
-                        scaled_image = np.arcsinh(
-                            calibrated_image / (softening + 1e-10)
-                        )
-                        scaled_image = scaled_image * 2.0
-                        # Fallback astronomical scaling applied
-                    else:
-                        scaled_image = calibrated_image
-                        logger.warning(
-                            "⚠️ No positive values found for astronomical scaling"
-                        )
             else:
-                # For microscopy, use percentile-based for very dark images
-                img_min, img_max = float(np.min(calibrated_image)), float(
-                    np.max(calibrated_image)
+                # For photography and microscopy: simple division by fixed scale
+                scaled_image = calibrated_image / fixed_scale
+                logger.info(
+                    f"   ✅ {domain.capitalize()}: fixed scaling by {fixed_scale}"
                 )
-                img_mean = float(np.mean(calibrated_image))
 
-                # If image is very dark (mean < 1% of max), use percentile-based normalization
-                if img_mean < img_max * 0.01 and img_max > 0:
-                    logger.warning(
-                        f"Very dark image detected, using percentile normalization"
-                    )
-                    # Use 1st and 99th percentiles for better contrast
-                    p1 = np.percentile(calibrated_image, 1)
-                    p99 = np.percentile(calibrated_image, 99)
-                    if p99 > p1:
-                        scaled_image = np.clip(
-                            (calibrated_image - p1) / (p99 - p1), 0, 1
-                        )
-                        # Percentile normalization applied
-                    else:
-                        scaled_image = np.clip(
-                            calibrated_image / (img_max + 1e-8), 0, 1
-                        )
-                        # Simple max normalization applied
-                else:
-                    # Standard normalization
-                    if img_max > img_min:
-                        scaled_image = (calibrated_image - img_min) / (
-                            img_max - img_min
-                        )
-                    else:
-                        scaled_image = np.clip(calibrated_image, 0, 1)
-                    # Simple normalization applied
+            # NO CLIPPING - preserve full physics for cross-domain generalization
+            # Data should naturally fall in [0, ~0.9] range based on physics-preserving scales
 
-            # === STEP 4: Normalize and convert to 8-bit [0,255] ===
-            img_min = float(np.min(scaled_image))
-            img_max = float(np.max(scaled_image))
-
-            if img_max > img_min and np.isfinite(img_min) and np.isfinite(img_max):
-                normalized_image = (scaled_image - img_min) / (img_max - img_min)
-            else:
-                logger.warning(
-                    f"Invalid range after scaling: [{img_min}, {img_max}], using fallback"
-                )
-                normalized_image = np.clip(scaled_image, 0, 1)
-
-            # Convert to 8-bit [0, 255]
-            image_8bit = np.clip(normalized_image * 255.0, 0, 255).astype(np.uint8)
-            # Converted to 8-bit
-
-            # === STEP 5: NOW tile the calibrated 8-bit image ===
-            # Convert back to CHW format if needed (tiler expects this)
-            if len(image_8bit.shape) == 2:
-                image_8bit = image_8bit[np.newaxis, :, :]  # Add channel dimension
-            elif len(image_8bit.shape) == 3 and image_8bit.shape[2] == 3:
+            # === STEP 4: NOW tile the calibrated image ===
+            # Convert to CHW format if needed (tiler expects this)
+            if len(scaled_image.shape) == 2:
+                scaled_image = scaled_image[np.newaxis, :, :]  # Add channel dimension
+            elif len(scaled_image.shape) == 3 and scaled_image.shape[2] == 3:
                 # Convert HWC → CHW for RGB
-                image_8bit = image_8bit.transpose(2, 0, 1)
+                scaled_image = scaled_image.transpose(2, 0, 1)
 
-            # Get systematic tiling configuration
-            overlap_ratio = self.overlap_ratios.get(domain, 0.1)
-            config = SystematicTilingConfig(
-                tile_size=self.tile_size,
-                overlap_ratio=overlap_ratio,
-                coverage_mode="complete",
-                edge_handling="pad_reflect",
-                min_valid_ratio=0.5,
-            )
-
-            # Extract tiles from calibrated 8-bit image
+            # Extract tiles from calibrated float32 image
             # Use custom tiling for ALL domains to ensure proper overlap and NO padding
             if domain == "photography":
                 file_path_str = metadata.get("file_path", "")
                 if file_path_str.endswith(".ARW"):
                     # Sony files: custom tiling to get exactly 54 tiles (6×9)
-                    tile_infos = self._extract_sony_tiles(image_8bit)
+                    tile_infos = self._extract_sony_tiles(scaled_image)
                 elif file_path_str.endswith(".RAF"):
                     # Fuji files: custom tiling to get exactly 24 tiles (4×6)
-                    tile_infos = self._extract_fuji_tiles(image_8bit)
+                    tile_infos = self._extract_fuji_tiles(scaled_image)
                 else:
                     # Fallback to Sony custom tiling
-                    tile_infos = self._extract_sony_tiles(image_8bit)
+                    tile_infos = self._extract_sony_tiles(scaled_image)
             elif domain == "astronomy":
                 # Custom tiling for astronomy to get exactly 81 tiles (9×9)
-                tile_infos = self._extract_astronomy_tiles(image_8bit)
+                tile_infos = self._extract_astronomy_tiles(scaled_image)
             elif domain == "microscopy":
                 # Custom tiling for microscopy to get exactly 16 tiles (4×4)
-                tile_infos = self._extract_microscopy_tiles(image_8bit)
+                tile_infos = self._extract_microscopy_tiles(scaled_image)
             else:
                 # Fallback for unknown domains
                 logger.warning(f"Unknown domain: {domain}, using SystematicTiler")
@@ -554,7 +427,7 @@ class SimpleTilesPipeline:
                     min_valid_ratio=0.5,
                 )
                 tiler = SystematicTiler(config)
-                tile_infos = tiler.extract_tiles(image_8bit)
+                tile_infos = tiler.extract_tiles(scaled_image)
 
             if not tile_infos:
                 logger.warning(f"No tiles extracted from {file_path}")
@@ -562,7 +435,7 @@ class SimpleTilesPipeline:
 
             # Tiles extracted
 
-            # === STEP 6-8: Process tiles and separate prior/posterior, assign splits ===
+            # === STEP 5: Process tiles and separate prior/posterior, assign splits ===
             processed_tiles = []
             # Note: In the new workflow, calibration happens to the FULL image before tiling,
             # so all tiles are already calibrated. No separate raw_tiles/calibrated_tiles stages.
@@ -580,16 +453,13 @@ class SimpleTilesPipeline:
             for i in range(max_tiles):
                 tile_info = tile_infos[i]
                 try:
-                    # Get 8-bit tile data (already calibrated and converted)
-                    tile_8bit = tile_info.tile_data
+                    # Get float32 tile data (already calibrated and scaled to [0,1])
+                    tile_float = tile_info.tile_data
 
                     # Validate tile data
-                    if tile_8bit is None or tile_8bit.size == 0:
+                    if tile_float is None or tile_float.size == 0:
                         logger.warning(f"Empty tile {i} from {file_path}")
                         continue
-
-                    # Tile is already 8-bit [0, 255], convert to float32 [0,1] for storage metadata
-                    tile_float = tile_8bit.astype(np.float32) / 255.0
 
                     # Ensure proper shape
                     if len(tile_float.shape) == 2:
@@ -604,7 +474,7 @@ class SimpleTilesPipeline:
                     else:
                         tile_to_save = tile_float
 
-                    # Save as PNG with unique tile_id
+                    # Save as .npy with unique tile_id
                     # For photography: include camera type to avoid Sony/Fuji collisions
                     # For microscopy: include parent directory structure to avoid file collisions
                     base_stem = Path(file_path).stem
@@ -640,7 +510,7 @@ class SimpleTilesPipeline:
                         # Default for other domains
                         tile_id = f"{domain}_{base_stem}_tile_{i:04d}"
 
-                    tile_metadata = self.save_tile_as_png(
+                    tile_metadata = self.save_tile_as_npy(
                         tile_to_save,
                         tile_id,
                         domain,
@@ -651,7 +521,7 @@ class SimpleTilesPipeline:
                     )
 
                     if tile_metadata:
-                        # Add comprehensive metadata for PNG tile storage
+                        # Add comprehensive metadata for .npy tile storage
                         tile_metadata.update(
                             {
                                 "tile_size": self.tile_size,
@@ -659,9 +529,9 @@ class SimpleTilesPipeline:
                                 "grid_y": int(tile_info.grid_position[1]),
                                 "image_x": int(tile_info.image_position[0]),
                                 "image_y": int(tile_info.image_position[1]),
-                                "channels": int(tile_float.shape[0]),
-                                "quality_score": float(np.mean(tile_float))
-                                if np.isfinite(np.mean(tile_float))
+                                "channels": int(tile_to_save.shape[0]),
+                                "quality_score": float(np.mean(tile_to_save))
+                                if np.isfinite(np.mean(tile_to_save))
                                 else 0.0,
                                 "valid_ratio": float(tile_info.valid_ratio),
                                 "is_edge_tile": bool(tile_info.is_edge_tile),
@@ -675,20 +545,21 @@ class SimpleTilesPipeline:
                                 "electron_max": float(electron_max),
                                 "electron_mean": float(electron_mean),
                                 "electron_std": float(electron_std),
-                                "norm_min": float(np.min(tile_float))
-                                if np.isfinite(np.min(tile_float))
+                                "norm_min": float(np.min(tile_to_save))
+                                if np.isfinite(np.min(tile_to_save))
                                 else 0.0,
-                                "norm_max": float(np.max(tile_float))
-                                if np.isfinite(np.max(tile_float))
+                                "norm_max": float(np.max(tile_to_save))
+                                if np.isfinite(np.max(tile_to_save))
                                 else 1.0,
-                                "norm_mean": float(np.mean(tile_float))
-                                if np.isfinite(np.mean(tile_float))
+                                "norm_mean": float(np.mean(tile_to_save))
+                                if np.isfinite(np.mean(tile_to_save))
                                 else 0.5,
-                                "norm_std": float(np.std(tile_float))
-                                if np.isfinite(np.std(tile_float))
+                                "norm_std": float(np.std(tile_to_save))
+                                if np.isfinite(np.std(tile_to_save))
                                 else 0.1,
                                 "split": split,
                                 "scene_id": scene_id,
+                                "fixed_scale": float(fixed_scale),
                             }
                         )
                         processed_tiles.append(tile_metadata)
@@ -700,6 +571,14 @@ class SimpleTilesPipeline:
             logger.info(
                 f"Generated {len(processed_tiles)} tiles from {Path(file_path).name}"
             )
+
+            # Log channel information for verification
+            if processed_tiles:
+                sample_tile = processed_tiles[0]
+                logger.info(
+                    f"   ✅ Domain: {domain}, Channels: {sample_tile['channels']}, "
+                    f"Expected: {'RGB (3 channels)' if domain == 'photography' else 'Grayscale (1 channel)'}"
+                )
 
             return processed_tiles
 
@@ -1021,10 +900,10 @@ class SimpleTilesPipeline:
 
         return reconstructed_metadata
 
-    def run_png_tiles_pipeline(self, max_files_per_domain: int = None):
-        """Run the complete PNG tiles pipeline"""
+    def run_npy_tiles_pipeline(self, max_files_per_domain: int = None):
+        """Run the complete .npy tiles pipeline with fixed domain-specific scaling"""
 
-        # Starting PNG Tiles Pipeline
+        # Starting .npy Tiles Pipeline
 
         # Define ALL files for each domain
         sample_files = {"photography": [], "microscopy": [], "astronomy": []}
@@ -1084,7 +963,7 @@ class SimpleTilesPipeline:
                     continue
 
                 try:
-                    tiles = self.process_file_to_png_tiles(file_path, domain_name)
+                    tiles = self.process_file_to_npy_tiles(file_path, domain_name)
                     domain_tiles.extend(tiles)
                     processed_files += 1
 
@@ -1148,6 +1027,8 @@ class SimpleTilesPipeline:
                 "processing_timestamp": datetime.now().isoformat(),
                 "tile_size": self.tile_size,
                 "overlap_ratios": self.overlap_ratios,
+                "fixed_scales": self.fixed_scales,
+                "storage_format": "npy_float32",
             },
             "tiles": all_tiles_metadata,
         }
@@ -1173,7 +1054,7 @@ class SimpleTilesPipeline:
                 logger.error(f"❌ Failed to save backup metadata: {e2}")
 
         logger.info(
-            f"PNG Tiles Pipeline Completed: {results['total_tiles']:,} tiles generated"
+            f".npy Tiles Pipeline Completed: {results['total_tiles']:,} tiles generated"
         )
 
         return results
@@ -1789,7 +1670,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Simple PNG Tiles Pipeline with Domain-Specific Calibration"
+        description="Simple .npy Tiles Pipeline with Domain-Specific Fixed Scaling"
     )
     parser.add_argument(
         "--base_path",
@@ -1806,15 +1687,16 @@ def main():
 
     args = parser.parse_args()
 
-    # Run PNG tiles pipeline
+    # Run .npy tiles pipeline
     pipeline = SimpleTilesPipeline(args.base_path)
-    results = pipeline.run_png_tiles_pipeline(args.max_files)
+    results = pipeline.run_npy_tiles_pipeline(args.max_files)
 
     if results.get("total_tiles", 0) > 0:
-        print(f"\n🎊 SUCCESS: PNG Tiles Pipeline Completed!")
-        print(f"📊 Total PNG tiles generated: {results['total_tiles']:,}")
+        print(f"\n🎊 SUCCESS: .npy Tiles Pipeline Completed!")
+        print(f"📊 Total .npy tiles generated: {results['total_tiles']:,}")
         print(f"📐 Tile size: 256×256")
-        print(f"💾 PNG files saved to: {args.base_path}/processed/png_tiles/")
+        print(f"💾 .npy files (float32) saved to: {args.base_path}/processed/npy_tiles/")
+        print(f"🎯 Fixed domain-specific scaling applied (no per-image normalization)")
 
         print(f"\n📋 Domain Results:")
         for domain, stats in results.get("domains", {}).items():
@@ -1958,6 +1840,6 @@ def get_calibration_description(
 
 
 if __name__ == "__main__":
-    # Start the PNG tiles pipeline
-    logger.info("🚀 Starting PNG tiles pipeline...")
+    # Start the .npy tiles pipeline with fixed domain-specific scaling
+    logger.info("🚀 Starting .npy tiles pipeline with fixed domain-specific scaling...")
     main()

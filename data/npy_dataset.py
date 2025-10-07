@@ -1,8 +1,14 @@
 """
-PNG dataset loader for 8-bit PNG images.
+NPY dataset loader for 32-bit float numpy arrays.
 
-This module provides dataset classes for loading 8-bit PNG images
-into the diffusion model training pipeline.
+This module provides dataset classes for loading 32-bit float .npy files
+into the diffusion model training pipeline WITHOUT quantization.
+
+Key features:
+- Preserves full float32 precision (no 8-bit quantization)
+- Compatible with EDM's training interface
+- Handles scientific imaging data (microscopy, astronomy, photography)
+- Supports metadata and calibration parameters
 """
 
 import json
@@ -13,8 +19,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-import torchvision.transforms as transforms
-from PIL import Image
 from torch.utils.data import Dataset
 
 from core.logging_config import get_logger
@@ -36,16 +40,21 @@ if TYPE_CHECKING:
     pass
 
 
-class EDMPNGDataset:
+class EDMNPYDataset:
     """
-    EDM-compatible wrapper for PNGDataset that provides the interface expected
-    by EDM's native training loop.
+    EDM-compatible dataset for 32-bit float .npy files.
 
-    This wrapper:
-    - Provides required properties (resolution, num_channels, label_dim)
-    - Returns data in EDM-compatible format (uint8 images + labels)
-    - Wraps our existing PNGDataset functionality
+    This dataset:
+    - Loads .npy files directly without quantization
+    - Preserves full float32 precision
+    - Provides the interface expected by EDM's native training loop
+    - Returns data in EDM-compatible format (float32 images + labels)
     - Compatible with EDM's InfiniteSampler and DataLoader
+
+    Key difference from EDMPNGDataset:
+    - No uint8 conversion - maintains float32 throughout
+    - No 8-bit quantization loss
+    - Assumes .npy files are already normalized or in electron units
     """
 
     def __init__(
@@ -60,22 +69,24 @@ class EDMPNGDataset:
         domain: Optional[str] = None,  # Auto-detect if None
         use_labels: bool = True,
         label_dim: int = 3,  # One-hot domain encoding for 3 domains
+        data_range: str = "normalized",  # 'normalized' [0,1] or 'electrons' or 'custom'
         **kwargs,
     ):
         """
-        Initialize EDM-compatible PNG dataset wrapper.
+        Initialize EDM-compatible NPY dataset.
 
         Args:
-            data_root: Root directory containing PNG files
+            data_root: Root directory containing .npy files
             metadata_json: Metadata JSON file with predefined splits
             split: Data split (train, validation, test)
             max_files: Maximum number of files to load
             seed: Random seed for reproducibility
-            image_size: Target image size (will resize if needed)
-            channels: Number of channels (3 for RGB)
+            image_size: Target image size (will validate shape matches)
+            channels: Number of channels (1 for grayscale, 3 for RGB)
             domain: Domain name ('photography', 'microscopy', 'astronomy'). Auto-detected if None.
             use_labels: Enable conditioning labels (for domain encoding)
             label_dim: Dimension of label space (3 for one-hot domain encoding)
+            data_range: Expected data range - 'normalized' [0,1], 'electrons', or 'custom'
             **kwargs: Additional arguments (ignored for compatibility)
         """
         # Auto-detect domain from metadata if not provided
@@ -83,6 +94,7 @@ class EDMPNGDataset:
             domain = self._detect_domain_from_metadata(metadata_json)
 
         self.domain = domain
+        self.data_range = data_range
 
         # Domain encoding mapping
         self.domain_to_label = {
@@ -96,7 +108,7 @@ class EDMPNGDataset:
                 f"Unsupported domain: {domain}. Supported: {list(self.domain_to_label.keys())}"
             )
 
-        # Initialize dataset parameters (same as PNGDataset but integrated)
+        # Initialize dataset parameters
         self.data_root = Path(data_root)
         self.metadata_json = Path(metadata_json)
         self.split = split
@@ -113,15 +125,12 @@ class EDMPNGDataset:
                 f"Metadata JSON file not found: {self.metadata_json}"
             )
 
-        # Find paired PNG files and create noisy mapping (integrated logic)
+        # Find .npy files and create mapping
         self.image_files, self.noisy_mapping = self._find_paired_files()
         self.calibration_params = getattr(self, "calibration_params", {})
 
         # Create train/val/test split
         self.split_files = self._create_split()
-
-        # Setup transforms
-        self.transform = self._setup_transforms()
 
         # Set up raw shape for EDM compatibility (N, C, H, W)
         self._raw_shape = [len(self.split_files), channels, image_size, image_size]
@@ -134,25 +143,51 @@ class EDMPNGDataset:
         self._xflip = np.zeros(len(self.split_files), dtype=np.uint8)
 
         # Set up dataset properties for EDM compatibility
-        self._name = f"png_{split}"
+        self._name = f"npy_{split}"
 
         # Cache for loaded images
         self._cached_images = {}
-        self._cache = False  # We'll implement caching if needed
+        self._cache = False  # Enable caching if needed for speed
 
         logger.info(
-            f"EDMPNGDataset ready: {len(self.split_files)} CLEAN tiles for '{split}' split (prior training) - Domain: {self.domain}"
+            f"EDMNPYDataset ready: {len(self.split_files)} float32 .npy tiles for '{split}' split - Domain: {self.domain}"
         )
+        logger.info(f"  Data range: {self.data_range}")
+        logger.info(f"  Shape: [{channels}, {image_size}, {image_size}]")
 
     def _detect_domain_from_metadata(self, metadata_json: Union[str, Path]) -> str:
         """Auto-detect domain from metadata JSON file."""
         try:
             with open(metadata_json, "r") as f:
                 metadata = json.load(f)
+
+            # Try to get domain from top-level field first
             domain = metadata.get("domain")
+            if domain and domain in ["photography", "microscopy", "astronomy"]:
+                return domain
+
+            # If no top-level domain, check if it's a comprehensive metadata file
+            if "domains_processed" in metadata:
+                # For comprehensive files, we need to determine domain from context
+                # Since this method is called during __init__ and domain is already set,
+                # return the current domain or default to photography
+                if hasattr(self, "domain") and self.domain:
+                    return self.domain
+                return "photography"  # Default fallback
+
+            # If domain is None or empty, default to photography
+            if not domain:
+                logger.warning(
+                    f"Domain field is None or empty in metadata, defaulting to photography"
+                )
+                return "photography"
+
+            # Validate domain value
             if domain not in ["photography", "microscopy", "astronomy"]:
                 raise ValueError(f"Unsupported domain in metadata: {domain}")
+
             return domain
+
         except Exception as e:
             logger.warning(f"Could not auto-detect domain from metadata: {e}")
             # Default to photography if detection fails
@@ -164,17 +199,36 @@ class EDMPNGDataset:
         try:
             with open(metadata_json, "r") as f:
                 metadata = json.load(f)
+
+            # Try to get domain from top-level field first
             domain = metadata.get("domain")
+            if domain and domain in ["photography", "microscopy", "astronomy"]:
+                return domain
+
+            # If no top-level domain, check if it's a comprehensive metadata file
+            if "domains_processed" in metadata:
+                # For comprehensive files, we can't determine a single domain
+                # Return None to indicate that domain should be explicitly specified
+                return None
+
+            # If domain is None or empty, return None to indicate explicit specification needed
+            if not domain:
+                logger.warning(f"Domain field is None or empty in metadata")
+                return None
+
+            # Validate domain value
             if domain not in ["photography", "microscopy", "astronomy"]:
                 raise ValueError(f"Unsupported domain in metadata: {domain}")
+
             return domain
+
         except Exception as e:
             logger.warning(f"Could not auto-detect domain from metadata: {e}")
-            # Default to photography if detection fails
-            return "photography"
+            # Return None if detection fails - caller should specify domain explicitly
+            return None
 
     def _find_paired_files(self) -> Tuple[List[Path], Dict[Path, Path]]:
-        """Find paired clean/noisy PNG files using metadata JSON file."""
+        """Find paired clean/noisy .npy files using metadata JSON file."""
         logger.info(f"Loading tile metadata from {self.metadata_json}")
 
         with open(self.metadata_json, "r") as f:
@@ -211,18 +265,13 @@ class EDMPNGDataset:
 
         split_tiles = tiles_by_split[self.split]
 
-        # FILTER OUT NOISY TILES FOR PRIOR TRAINING
-        # Only use clean tiles (long exposures), not noisy tiles (short exposures)
-        # Noisy tiles typically have short exposure times (e.g., "0.04s", "0.1s")
-        # Clean tiles have long exposure times (e.g., "10s", "30s")
+        # FILTER OUT NOISY TILES FOR PRIOR TRAINING (same logic as PNG dataset)
         clean_tiles_only = []
         noisy_tiles_filtered = []
 
         for tile in split_tiles:
             tile_id = tile.get("tile_id", "")
-            # Check if this is a noisy tile (short exposure) by looking at the tile_id pattern
-            # Noisy tiles contain exposure times like "0.04s", "0.1s", "0.033s" etc.
-            # Clean tiles contain longer exposures like "10s", "30s" etc.
+            # Check if this is a noisy tile (short exposure)
             is_noisy = False
             if "_0." in tile_id:  # Short exposure (e.g., 0.04s, 0.1s)
                 is_noisy = True
@@ -253,7 +302,6 @@ class EDMPNGDataset:
                 continue
 
             # Store calibration parameters for this tile
-            # Use electron statistics from metadata for physics-aware training
             electron_min = tile.get("electron_min", 0.0)
             electron_max = tile.get("electron_max", 1000.0)
             electron_mean = tile.get("electron_mean", 500.0)
@@ -262,65 +310,59 @@ class EDMPNGDataset:
             self.calibration_params[tile_id] = {
                 "gain": tile.get("gain", 1.0),
                 "read_noise": tile.get("read_noise", 0.0),
-                "background": electron_min,  # Use electron_min as background
-                "scale": electron_max,  # Use electron_max as scale for physics-aware training
+                "background": electron_min,
+                "scale": electron_max,
                 "electron_min": electron_min,
                 "electron_max": electron_max,
                 "electron_mean": electron_mean,
                 "electron_std": electron_std,
             }
 
-            # Use the png_path from metadata (absolute path through symlink)
-            clean_path_str = tile.get("png_path")
-            if not clean_path_str:
+            # Look for .npy file instead of .png
+            # Try multiple possible paths
+            npy_path_candidates = [
+                # From metadata (if it stores npy_path)
+                Path(tile.get("npy_path", "")),
+                # Replace .png with .npy in png_path
+                Path(str(tile.get("png_path", "")).replace(".png", ".npy")),
+                # Construct from data_root
+                self.data_root / f"{tile_id}.npy",
+                # Try clean subdirectory
+                self.data_root / "clean" / f"{tile_id}.npy",
+            ]
+
+            clean_path = None
+            for candidate in npy_path_candidates:
+                if candidate.exists():
+                    clean_path = candidate
+                    break
+
+            if clean_path is None:
+                logger.debug(f"Clean .npy file not found for: {tile_id}")
                 continue
 
-            clean_path = Path(clean_path_str)
-
-            # Check if the absolute path from metadata exists (through symlink)
-            if clean_path.exists():
-                clean_files.append(clean_path)
-            else:
-                # Fallback: try constructing path relative to data_root
-                clean_path = self.data_root / f"{tile_id}.png"
-                if clean_path.exists():
-                    clean_files.append(clean_path)
-                else:
-                    logger.debug(f"Clean file not found: {tile_id}")
-                    continue
+            clean_files.append(clean_path)
 
             # Find corresponding noisy file
-            # Get the directory of the clean file and construct noisy path
-            clean_dir = clean_path.parent.parent  # Go up to png_tiles/photography/
-            noisy_path = clean_dir / "noisy" / f"{tile_id}.png"
+            clean_dir = (
+                clean_path.parent.parent
+                if clean_path.parent.name == "clean"
+                else clean_path.parent
+            )
+            noisy_path = clean_dir / "noisy" / f"{tile_id}.npy"
 
             if noisy_path.exists():
                 noisy_mapping[clean_path] = noisy_path
             else:
-                # Try pattern matching with scene_id
-                scene_id = tile.get("scene_id", "")
-                if scene_id:
-                    # Extract scene number from scene_id (e.g., "photo_00145" -> "00145")
-                    scene_num = scene_id.split("_")[-1] if "_" in scene_id else scene_id
-                    tile_num = tile_id.split("_")[-1] if "_" in tile_id else ""
-
-                    # Look for noisy files with this scene and tile
-                    noisy_pattern = f"{self.domain}_*_{scene_num}_*_tile_{tile_num}.png"
-                    noisy_dir = clean_dir / "noisy"
-                    noisy_matches = list(noisy_dir.glob(noisy_pattern))
-
-                    if noisy_matches:
-                        noisy_mapping[clean_path] = noisy_matches[0]
-                    else:
-                        logger.debug(f"No noisy file found for {tile_id}")
+                logger.debug(f"No noisy .npy file found for {tile_id}")
 
         if not clean_files:
             raise FileNotFoundError(
-                f"No valid clean files found for split '{self.split}'"
+                f"No valid .npy files found for split '{self.split}'"
             )
 
         logger.info(
-            f"✓ Loaded {len(clean_files)} CLEAN tiles (prior training) for '{self.split}' split"
+            f"✓ Loaded {len(clean_files)} CLEAN .npy tiles (float32) for '{self.split}' split"
         )
         logger.info(
             f"  └─ Calibration parameters: {len(self.calibration_params)} tiles"
@@ -330,7 +372,6 @@ class EDMPNGDataset:
 
     def _create_split(self) -> List[Path]:
         """Apply max_files limit to image files (splits already defined in metadata)."""
-        # The split is already handled by _find_paired_files_from_metadata
         split_files = self.image_files.copy()
 
         # Apply max_files limit if specified
@@ -339,16 +380,6 @@ class EDMPNGDataset:
             logger.info(f"Limited to {self.max_files} files for {self.split} split")
 
         return split_files
-
-    def _setup_transforms(self) -> transforms.Compose:
-        """Setup image transforms - keeps data in [0, 255] range."""
-        transform_list = [
-            transforms.Resize((self.image_size, self.image_size)),
-            # NOTE: Not using ToTensor() to avoid normalization to [0, 1]
-            # Data stays in [0, 255] range for explicit normalization in training script
-        ]
-
-        return transforms.Compose(transform_list)
 
     def _get_raw_labels(self):
         """Get raw labels for EDM compatibility with domain-aware encoding."""
@@ -374,25 +405,34 @@ class EDMPNGDataset:
         return self._raw_labels
 
     def _load_raw_image(self, raw_idx):
-        """Load raw image in EDM format (uint8, CHW)."""
+        """
+        Load raw image in EDM format (float32, CHW).
+
+        CRITICAL: Returns float32 arrays, NOT uint8!
+        This overrides EDM's default uint8 expectation.
+        """
         # Get image using integrated logic
-        png_item = self._load_png_item(raw_idx)
+        npy_item = self._load_npy_item(raw_idx)
 
-        # Extract clean image (already in [0, 255] range, CHW format)
-        clean_image = png_item["clean"]
+        # Extract clean image (already in float32, normalized or electron units)
+        clean_image = npy_item["clean"]
 
-        # Convert to numpy and ensure uint8 format
-        image_np = clean_image.numpy()
+        # Convert to numpy and ensure float32 format
+        image_np = (
+            clean_image.numpy()
+            if isinstance(clean_image, torch.Tensor)
+            else clean_image
+        )
 
-        # If we have float values in [0, 255], convert to uint8
-        if image_np.dtype != np.uint8:
-            image_np = np.clip(image_np, 0, 255).astype(np.uint8)
+        # Ensure float32 dtype
+        if image_np.dtype != np.float32:
+            image_np = image_np.astype(np.float32)
 
         # Ensure shape is (C, H, W) - EDM expects CHW format
         if image_np.ndim == 2:
             # Grayscale to (1, H, W)
             image_np = np.expand_dims(image_np, axis=0)
-        elif image_np.ndim == 3 and image_np.shape[0] != 3:  # HWC format
+        elif image_np.ndim == 3 and image_np.shape[-1] in [1, 3]:  # HWC format
             # Convert from HWC to CHW
             image_np = np.transpose(image_np, (2, 0, 1))
 
@@ -402,12 +442,12 @@ class EDMPNGDataset:
         """Return dataset length."""
         return len(self.split_files)
 
-    def _load_png_item(self, idx: int) -> Dict[str, Any]:
+    def _load_npy_item(self, idx: int) -> Dict[str, Any]:
         """
-        Load and process a clean PNG image (integrated version of PNGDataset.__getitem__).
+        Load and process a clean .npy file.
 
         Returns dict with:
-            - 'clean': Clean image data (C, H, W) in [0,1] range - used for training
+            - 'clean': Clean image data (C, H, W) in float32 - used for training
             - 'electrons': Clean image data in electron units - used for physics-aware loss
             - 'domain': Domain tensor
             - 'metadata': Image metadata
@@ -416,8 +456,8 @@ class EDMPNGDataset:
         try:
             clean_path = self.split_files[idx]
 
-            # Load only the clean image
-            clean = self._load_png_image_direct(clean_path)
+            # Load .npy file directly as float32
+            clean = self._load_npy_image_direct(clean_path)
 
             # Extract metadata
             metadata = {
@@ -428,16 +468,14 @@ class EDMPNGDataset:
             }
 
             # Get calibration parameters for this tile from metadata
-            tile_id = clean_path.name.replace(
-                ".png", ""
-            )  # Extract tile_id from filename
+            tile_id = clean_path.name.replace(".npy", "")
             calib_params = self.calibration_params.get(tile_id, {})
 
             # Use electron statistics from metadata for physics-aware training
             scale = calib_params.get("electron_max", 1000.0)
             background = calib_params.get("electron_min", 0.0)
 
-            calib_params = {
+            calib_params_dict = {
                 "scale": scale,
                 "gain": calib_params.get("gain", 1.0),
                 "read_noise": calib_params.get("read_noise", 0.0),
@@ -446,22 +484,37 @@ class EDMPNGDataset:
 
             # Domain parameters from metadata
             domain_params = {
-                "scale": calib_params["scale"],
-                "gain": calib_params["gain"],
-                "read_noise": calib_params["read_noise"],
-                "background": calib_params["background"],
+                "scale": calib_params_dict["scale"],
+                "gain": calib_params_dict["gain"],
+                "read_noise": calib_params_dict["read_noise"],
+                "background": calib_params_dict["background"],
             }
 
-            # Convert clean image from [0,1] to electron units for physics-aware training
-            # Scale from normalized [0,1] to electron scale
-            electrons = clean * calib_params["scale"] + calib_params["background"]
+            # Convert clean image to electron units if needed
+            if self.data_range == "normalized":
+                # Assume data is in [0, 1], scale to electron units
+                electrons = (
+                    clean * calib_params_dict["scale"] + calib_params_dict["background"]
+                )
+            elif self.data_range == "electrons":
+                # Data is already in electron units
+                electrons = (
+                    clean.clone()
+                    if isinstance(clean, torch.Tensor)
+                    else torch.from_numpy(clean.copy())
+                )
+            else:
+                # Custom range - use as-is
+                electrons = (
+                    clean.clone()
+                    if isinstance(clean, torch.Tensor)
+                    else torch.from_numpy(clean.copy())
+                )
 
             # Domain encoding for physics-aware training
             domain_encoding = {"photography": 0, "microscopy": 1, "astronomy": 2}
             domain_id = domain_encoding.get(self.domain, 0)
 
-            # CRITICAL FIX: Flatten domain_params into batch for validation compatibility
-            # The validation step expects scale, read_noise, background at the top level
             return {
                 "clean": clean,
                 "electrons": electrons,
@@ -469,26 +522,28 @@ class EDMPNGDataset:
                 "metadata": metadata,
                 "domain_params": domain_params,
                 # Flatten calibration parameters for trainer compatibility
-                "scale": torch.tensor([calib_params["scale"]], dtype=torch.float32),
+                "scale": torch.tensor(
+                    [calib_params_dict["scale"]], dtype=torch.float32
+                ),
                 "read_noise": torch.tensor(
-                    [calib_params["read_noise"]], dtype=torch.float32
+                    [calib_params_dict["read_noise"]], dtype=torch.float32
                 ),
                 "background": torch.tensor(
-                    [calib_params["background"]], dtype=torch.float32
+                    [calib_params_dict["background"]], dtype=torch.float32
                 ),
-                "gain": torch.tensor([calib_params["gain"]], dtype=torch.float32),
+                "gain": torch.tensor([calib_params_dict["gain"]], dtype=torch.float32),
             }
 
         except Exception as e:
-            logger.warning(f"Error loading PNG {idx}: {e}")
-            # Return dummy data to prevent training crashes (in [0, 1] range)
+            logger.warning(f"Error loading .npy file {idx}: {e}")
+            # Return dummy data to prevent training crashes
             return {
                 "clean": torch.zeros(
-                    self.channels, self.image_size, self.image_size
-                ),  # [0, 1] range
+                    self.channels, self.image_size, self.image_size, dtype=torch.float32
+                ),
                 "electrons": torch.zeros(
-                    self.channels, self.image_size, self.image_size
-                ),  # [0, inf] range for electron units
+                    self.channels, self.image_size, self.image_size, dtype=torch.float32
+                ),
                 "domain": torch.tensor(0),
                 "metadata": {"corrupted": True, "original_idx": idx},
                 "domain_params": {
@@ -497,51 +552,70 @@ class EDMPNGDataset:
                     "read_noise": 0.0,
                     "background": 0.0,
                 },
-                # Flatten calibration parameters for trainer compatibility
                 "scale": torch.tensor([1000.0], dtype=torch.float32),
                 "read_noise": torch.tensor([0.0], dtype=torch.float32),
                 "background": torch.tensor([0.0], dtype=torch.float32),
                 "gain": torch.tensor([1.0], dtype=torch.float32),
             }
 
-    def _load_png_image_direct(self, image_path: Path) -> torch.Tensor:
-        """Load and preprocess a PNG image - keeps data in [0, 255] range."""
+    def _load_npy_image_direct(self, image_path: Path) -> torch.Tensor:
+        """Load a .npy file directly as float32 tensor."""
         try:
-            # Load image
-            image = Image.open(image_path)
+            # Load .npy file
+            image_np = np.load(str(image_path)).astype(np.float32)
 
-            # Convert RGBA to RGB if needed for consistency with model configuration
-            if image.mode == "RGBA" and self.channels == 3:
-                # Convert RGBA to RGB by removing alpha channel
-                # Create RGB image from RGBA
-                rgb_image = Image.new("RGB", image.size, (255, 255, 255))
-                rgb_image.paste(image, mask=image.split()[-1])  # Use alpha as mask
-                image = rgb_image
-            elif image.mode != "RGB" and self.channels == 3:
-                # Convert other modes to RGB
-                image = image.convert("RGB")
+            # Validate shape
+            if image_np.ndim == 2:
+                # Grayscale image (H, W)
+                if image_np.shape != (self.image_size, self.image_size):
+                    logger.warning(
+                        f"Image shape {image_np.shape} doesn't match expected {(self.image_size, self.image_size)}"
+                    )
+                # Will be converted to (1, H, W) later
+            elif image_np.ndim == 3:
+                # Multi-channel image - could be (C, H, W) or (H, W, C)
+                if image_np.shape[0] in [1, 3]:  # CHW format
+                    expected_shape = (self.channels, self.image_size, self.image_size)
+                else:  # HWC format
+                    expected_shape = (self.image_size, self.image_size, self.channels)
 
-            # Apply transforms (resize only, no normalization)
-            image = self.transform(image)
+                if image_np.shape != expected_shape and image_np.shape[:2] != (
+                    self.image_size,
+                    self.image_size,
+                ):
+                    logger.warning(
+                        f"Image shape {image_np.shape} doesn't match expected size {self.image_size}"
+                    )
+            else:
+                raise ValueError(f"Unexpected number of dimensions: {image_np.ndim}")
 
-            # Convert PIL Image to tensor in [0, 255] range (not normalized)
-            # PIL Image is uint8 [0, 255], we keep it as float32 [0, 255]
-            tensor = torch.from_numpy(np.array(image)).float()
+            # Convert to PyTorch tensor
+            tensor = torch.from_numpy(image_np).float()
 
-            # Convert from (H, W, C) to (C, H, W) format
-            tensor = (
-                tensor.permute(2, 0, 1) if tensor.ndim == 3 else tensor.unsqueeze(0)
-            )
+            # Ensure CHW format
+            if tensor.ndim == 2:
+                # Add channel dimension
+                tensor = tensor.unsqueeze(0)
+            elif tensor.ndim == 3 and tensor.shape[-1] in [1, 3]:
+                # Convert HWC to CHW
+                tensor = tensor.permute(2, 0, 1)
 
             return tensor
 
         except Exception as e:
-            logger.warning(f"Error loading image {image_path}: {e}")
-            # Return dummy image with correct number of channels in [0, 255] range
-            return torch.zeros(self.channels, self.image_size, self.image_size)
+            logger.warning(f"Error loading .npy file {image_path}: {e}")
+            # Return dummy image
+            return torch.zeros(
+                self.channels, self.image_size, self.image_size, dtype=torch.float32
+            )
 
     def __getitem__(self, idx):
-        """Get item as (image, label) tuple for EDM compatibility."""
+        """
+        Get item as (image, label) tuple for EDM compatibility.
+
+        CRITICAL: Returns float32 arrays, NOT uint8!
+        The training script will need to handle float32 data appropriately.
+        """
         raw_idx = self._raw_idx[idx]
         image = self._cached_images.get(raw_idx, None)
         if image is None:
@@ -556,7 +630,7 @@ class EDMPNGDataset:
             assert image.ndim == 3  # CHW
             image = image[:, :, ::-1]  # Flip horizontally
 
-        return image, label
+        return image.copy(), label
 
     @property
     def name(self):
@@ -607,18 +681,17 @@ class EDMPNGDataset:
 
     def get_calibration_params(self, idx):
         """Get calibration parameters for a specific index."""
-        return self._load_png_item(idx).get("domain_params", {})
+        return self._load_npy_item(idx).get("domain_params", {})
 
     def close(self):
         """Clean up resources."""
-        # No specific cleanup needed for the integrated functionality
         pass
 
 
-def create_edm_png_datasets(
+def create_edm_npy_datasets(
     data_root: Union[str, Path],
     metadata_json: Union[str, Path],
-    domain: Optional[str] = None,  # Auto-detect if None
+    domain: Optional[str] = None,  # Must specify for comprehensive metadata files
     train_split: str = "train",
     val_split: str = "validation",
     max_files: Optional[int] = None,
@@ -626,37 +699,48 @@ def create_edm_png_datasets(
     image_size: int = 256,
     channels: int = 3,
     label_dim: int = 3,
-) -> Tuple[EDMPNGDataset, EDMPNGDataset]:
+    data_range: str = "normalized",
+) -> Tuple[EDMNPYDataset, EDMNPYDataset]:
     """
-    Create EDM-compatible training and validation datasets from PNG images.
+    Create EDM-compatible training and validation datasets from .npy files.
 
     Args:
-        data_root: Root directory containing PNG files
+        data_root: Root directory containing .npy files
         metadata_json: Metadata JSON file with predefined splits
-        domain: Domain name ('photography', 'microscopy', 'astronomy'). Auto-detected if None.
+        domain: Domain name ('photography', 'microscopy', 'astronomy'). Required for comprehensive metadata files.
         train_split: Training split name
         val_split: Validation split name
         max_files: Maximum files per split (None for all)
         seed: Random seed
         image_size: Target image size
-        channels: Number of channels (3 for RGB)
+        channels: Number of channels (1 for grayscale, 3 for RGB)
         label_dim: Label dimension for one-hot domain encoding
+        data_range: Expected data range - 'normalized' [0,1], 'electrons', or 'custom'
 
     Returns:
         Tuple of (train_dataset, val_dataset) compatible with EDM's native interface
     """
-    # Auto-detect domain if not provided
+    # Auto-detect domain if not provided and metadata supports it
     if domain is None:
-        domain = EDMPNGDataset._detect_domain_from_metadata_static(metadata_json)
+        detected_domain = EDMNPYDataset._detect_domain_from_metadata_static(
+            metadata_json
+        )
+        if detected_domain is None:
+            raise ValueError(
+                f"Domain could not be auto-detected from metadata file {metadata_json}. "
+                "Please specify domain explicitly. Supported domains: photography, microscopy, astronomy"
+            )
+        domain = detected_domain
 
-    logger.info(f"Creating EDM-compatible PNG datasets for {domain}")
+    logger.info(f"Creating EDM-compatible NPY datasets for {domain}")
     logger.info(f"Data root: {data_root}")
     logger.info(f"Image size: {image_size}x{image_size}")
     logger.info(f"Channels: {channels}")
     logger.info(f"Label dim: {label_dim}")
+    logger.info(f"Data range: {data_range}")
 
     # Create training dataset
-    train_dataset = EDMPNGDataset(
+    train_dataset = EDMNPYDataset(
         data_root=data_root,
         metadata_json=metadata_json,
         split=train_split,
@@ -667,11 +751,12 @@ def create_edm_png_datasets(
         domain=domain,
         use_labels=True,
         label_dim=label_dim,
+        data_range=data_range,
     )
 
     # Create validation dataset
     val_max_files = max_files // 5 if max_files else None  # Use 20% for validation
-    val_dataset = EDMPNGDataset(
+    val_dataset = EDMNPYDataset(
         data_root=data_root,
         metadata_json=metadata_json,
         split=val_split,
@@ -682,9 +767,10 @@ def create_edm_png_datasets(
         domain=domain,
         use_labels=True,
         label_dim=label_dim,
+        data_range=data_range,
     )
 
-    logger.info(f"✅ Created EDM-compatible PNG datasets:")
+    logger.info(f"✅ Created EDM-compatible NPY datasets (float32, no quantization):")
     logger.info(f"  Training: {len(train_dataset)} samples")
     logger.info(f"  Validation: {len(val_dataset)} samples")
     logger.info(f"  Resolution: {train_dataset.resolution}x{train_dataset.resolution}")
