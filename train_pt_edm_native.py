@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Train restoration model using EDM's native training code with FLOAT32 .npy files.
+Train restoration model using EDM's native training code with FLOAT32 .pt files.
 
-This script uses EDM's native utilities with 32-bit float .npy files (NO QUANTIZATION):
+This script uses EDM's native utilities with 32-bit float .pt files (NO QUANTIZATION):
 - Uses torch_utils.distributed for distributed training
 - Uses torch_utils.training_stats for metrics tracking
 - Uses torch_utils.misc for model utilities (EMA, checkpointing, etc.)
@@ -10,7 +10,7 @@ This script uses EDM's native utilities with 32-bit float .npy files (NO QUANTIZ
 - Follows EDM's training_loop.py structure
 
 Key Differences from PNG training:
-- Loads 32-bit float .npy files instead of 8-bit PNG
+- Loads 32-bit float .pt files instead of 8-bit PNG
 - NO quantization loss - preserves full precision
 - Data is in [0, ~1] normalized range from pipeline's fixed scaling:
   * Photography: ADU * gain / 80000.0
@@ -43,8 +43,8 @@ sys.path.insert(0, str(edm_path))
 # Import EDM native components
 import external.edm.dnnlib
 
-# Import our NPY dataset
-from data.npy_dataset import create_edm_npy_datasets
+# Import our PT dataset
+from data.dataset import create_edm_pt_datasets
 from external.edm.torch_utils import distributed as dist
 from external.edm.torch_utils import misc, training_stats
 from external.edm.training.loss import EDMLoss
@@ -72,15 +72,15 @@ def training_loop(
     start_kimg=0,
 ):
     """
-    Main training loop for float32 .npy data following EDM's structure.
+    Main training loop for float32 .pt data following EDM's structure.
 
-    CRITICAL: This handles float32 data directly, NOT uint8!
-    Data is expected to be in [0, ~1] range from the pipeline's fixed scaling:
-    - Photography: scaled by 80000.0
-    - Microscopy: scaled by 66000.0
-    - Astronomy: (calibrated + 5.0) / 170.0
+    CRITICAL: This handles float32 data already in [-1, 1] range from pipeline!
+    Pipeline applies domain-specific scaling followed by [-1, 1] normalization:
+    - Photography: ADU / 16000.0 -> normalize to [-1, 1]
+    - Microscopy: ADU / 65535.0 -> normalize to [-1, 1]
+    - Astronomy: (ADU + 5.0) / 110.0 -> normalize to [-1, 1]
 
-    The training loop will normalize to [-1, 1] for EDM as needed.
+    No additional normalization needed - data is ready for EDM training.
     """
     # Initialize
     start_time = time.time()
@@ -119,9 +119,9 @@ def training_loop(
         )
     )
 
-    dist.print0(f"Dataset: {len(train_dataset)} training samples (float32 .npy)")
-    dist.print0(f"         {len(val_dataset)} validation samples (float32 .npy)")
-    dist.print0(f"         Data already scaled to [0, ~1] by pipeline's fixed scaling")
+    dist.print0(f"Dataset: {len(train_dataset)} training samples (float32 .pt)")
+    dist.print0(f"         {len(val_dataset)} validation samples (float32 .pt)")
+    dist.print0(f"         Data already normalized to [-1, 1] by pipeline")
 
     # Construct network using EDM's pattern
     dist.print0("Constructing network...")
@@ -206,7 +206,7 @@ def training_loop(
         optimizer.zero_grad(set_to_none=True)
         for round_idx in range(num_accumulation_rounds):
             with misc.ddp_sync(ddp, (round_idx == num_accumulation_rounds - 1)):
-                # Get batch - returns float32 arrays in [0, ~1] range from pipeline
+                # Get batch - returns float32 tensors in [0, ~1] range from pipeline
                 images, labels = next(dataset_iterator)
 
                 # Move to device
@@ -214,17 +214,16 @@ def training_loop(
                 labels = labels.to(device)
 
                 # CRITICAL: Handle float32 data properly
-                # Pipeline already scaled to [0, ~1] using domain-specific fixed scales:
-                # - Photography: ADU * gain / 80000.0
-                # - Microscopy: ADU * gain / 66000.0
-                # - Astronomy: (ADU * gain + 5.0) / 170.0
+                # Pipeline already normalized to [-1, 1] using domain-specific scaling + normalization:
+                # 1. Domain-specific scaling: image / fixed_scale (photography: 16000, microscopy: 65535, astronomy: 110)
+                # 2. Astronomy offset: (image + 5.0) / fixed_scale
+                # 3. Final normalization: transforms.Normalize(mean=[0.5], std=[0.5]) -> [-1, 1]
 
                 # Convert to float32 if not already
                 images = images.to(torch.float32)
 
-                # Normalize to [-1, 1] range for EDM
-                # Since pipeline data is in [0, ~1], we scale: x * 2 - 1
-                images = images * 2.0 - 1.0
+                # Data is already in [-1, 1] range from pipeline normalization
+                # No additional normalization needed
 
                 # Compute loss using EDM's native loss
                 loss = loss_fn(net=ddp, images=images, labels=labels, augment_pipe=None)
@@ -393,7 +392,7 @@ def training_loop(
 
 @torch.no_grad()
 def validate(ema_model, val_dataset, loss_fn, device):
-    """Run validation with float32 .npy data in [0, ~1] range from pipeline."""
+    """Run validation with float32 .pt data in [-1, 1] range from pipeline."""
     ema_model.eval()
 
     val_sampler = misc.InfiniteSampler(
@@ -417,17 +416,17 @@ def validate(ema_model, val_dataset, loss_fn, device):
 
     for _ in range(min(50, len(val_dataset) // 4)):
         try:
-            # Get batch - float32 data in [0, ~1] from pipeline
+            # Get batch - float32 tensors in [-1, 1] from pipeline
             images, labels = next(val_iterator)
 
             # Move to device
             images = images.to(device)
             labels = labels.to(device)
 
-            # Convert to float32 and normalize to [-1, 1]
-            # Pipeline data is in [0, ~1], scale to [-1, 1] for EDM
+            # Convert to float32 - data is already in [-1, 1] range from pipeline
+            # Pipeline applies domain-specific scaling + transforms.Normalize(mean=[0.5], std=[0.5])
             images = images.to(torch.float32)
-            images = images * 2.0 - 1.0
+            # No additional normalization needed - tensors are already in [-1, 1] range
 
             # Compute loss
             loss = loss_fn(
@@ -443,23 +442,24 @@ def validate(ema_model, val_dataset, loss_fn, device):
 
 
 def main():
-    """Main training function for float32 .npy data.
+    """Main training function for float32 .pt data.
 
-    The training script expects .npy files that have been processed by the pipeline with:
+    The training script expects .pt files that have been processed by the pipeline with:
     - Domain-specific physics calibration (ADU → electrons)
-    - Fixed scaling to [0, ~1] range:
-      * Photography: electrons / 80000.0
-      * Microscopy: electrons / 66000.0
-      * Astronomy: (electrons + 5.0) / 170.0
+    - Domain-specific scaling to [0, ~1] range:
+      * Photography: electrons / 16000.0
+      * Microscopy: electrons / 65535.0
+      * Astronomy: (electrons + 5.0) / 110.0
+    - Final normalization to [-1, 1] using transforms.Normalize(mean=[0.5], std=[0.5])
     - Metadata JSON with splits, calibration parameters, and scaling info
 
     The training loop will:
-    1. Load float32 .npy data in [0, ~1] range
-    2. Normalize to [-1, 1] for EDM: x * 2 - 1
+    1. Load float32 .pt data already in [-1, 1] range
+    2. Use data directly for EDM training (no additional normalization)
     3. Train the diffusion model with full precision (no quantization)
     """
     parser = argparse.ArgumentParser(
-        description="Train model with EDM native training using float32 .npy files (NO QUANTIZATION)"
+        description="Train model with EDM native training using float32 .pt files (NO QUANTIZATION)"
     )
 
     # Data arguments
@@ -467,7 +467,7 @@ def main():
         "--data_root",
         type=str,
         required=True,
-        help="Path to data directory containing .npy tiles",
+        help="Path to data directory containing .pt tiles",
     )
     parser.add_argument(
         "--metadata_json",
@@ -555,7 +555,7 @@ def main():
     if dist.get_rank() == 0:
         os.makedirs(run_dir, exist_ok=True)
         dist.print0("=" * 60)
-        dist.print0("EDM NATIVE TRAINING WITH FLOAT32 .NPY FILES")
+        dist.print0("EDM NATIVE TRAINING WITH FLOAT32 .PT FILES")
         dist.print0("NO QUANTIZATION - FULL PRECISION")
         dist.print0("=" * 60)
 
@@ -567,9 +567,9 @@ def main():
         )
 
     # Create datasets
-    dist.print0("Loading float32 .npy datasets...")
+    dist.print0("Loading float32 .pt datasets...")
     dataset_kwargs = dict(
-        class_name="data.npy_dataset.EDMNPYDataset",
+        class_name="data.dataset.EDMPTDataset",
         data_root=args.data_root,
         metadata_json=args.metadata_json,
         split="train",
@@ -578,7 +578,7 @@ def main():
         domain="photography",  # Specify domain explicitly for comprehensive metadata files
         use_labels=True,
         label_dim=3,
-        data_range="normalized",  # Pipeline outputs [0, ~1] scaled data
+        data_range="normalized",  # Pipeline outputs [-1, 1] normalized data
         max_size=None,
     )
 

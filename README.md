@@ -4,7 +4,7 @@ A unified framework for low-light image restoration across photography, microsco
 
 ## Project Status
 
-🚧 **Currently in development** - Phase 3: Model Training & Validation
+🚧 **Currently in development** - Phase 4: Cross-Domain Training & Evaluation
 
 ## Recent Progress
 
@@ -19,19 +19,46 @@ A unified framework for low-light image restoration across photography, microsco
   - ✅ **Task 2.1**: Domain-specific physics calibration system
   - ✅ **Task 2.2**: Poisson-Gaussian noise modeling
   - ✅ **Task 2.3**: Complete preprocessing pipeline with fixed scaling
-- 🚧 **Phase 3 In Progress**: Model Training & Validation
-  - ✅ **Task 3.1**: EDM native training with float32 .npy (NO quantization)
-  - ✅ **Task 3.2**: Multi-domain preprocessing pipeline
+- ✅ **Phase 3 Complete**: Data Processing & Single-Domain Training
+  - ✅ **Task 3.1**: EDM native training with float32 .pt (NO quantization)
+  - ✅ **Task 3.2**: Multi-domain preprocessing pipeline (78,806 tiles generated)
   - ✅ **Task 3.3**: Training data loader with physics metadata
-  - ⏳ **Task 3.4**: Cross-domain training and validation
+  - ✅ **Task 3.4**: Photography single-domain model training
+  - ✅ **Task 3.5**: Microscopy single-domain model training
+- 🚧 **Phase 4 In Progress**: Cross-Domain & Evaluation
+  - ⏳ **Task 4.1**: Astronomy single-domain model training
+  - ⏳ **Task 4.2**: Cross-domain generalization model
+  - ⏳ **Task 4.3**: Inference pipeline implementation
+  - ⏳ **Task 4.4**: Baseline comparisons (BM3D, NLM, Deep learning methods)
 
 ## Key Features
 
 - **Physics-Aware**: Exact Poisson-Gaussian noise modeling with domain-specific calibration
 - **Cross-Domain**: Unified model architecture for photography, microscopy, and astronomy
-- **Full Precision**: Float32 .npy pipeline preserves all sensor information (NO quantization)
+- **Full Precision**: Float32 .pt pipeline preserves all sensor information (NO quantization)
 - **Fixed Scaling**: Domain-specific physics-based normalization for stable training
 - **Metadata-Rich**: Complete calibration parameters and physics information preserved
+
+## Data Processing Overview
+
+Our preprocessing pipeline (detailed in `preprocessing/DATA_PROCESSING.md`) converts raw sensor data from three imaging domains into unified 256×256 float32 tiles with domain-specific normalization. The pipeline implements:
+
+- **Domain-specific range normalization**: [domain_min, domain_max] → [0,1] → [-1,1]
+- **Physics-based calibration**: ADU → electrons conversion with sensor-specific gains
+- **Scene-based splitting**: 70/15/15 train/val/test with no data leakage
+- **Systematic tiling**: Grid-based extraction with controlled overlap
+- **Perfect pairing**: 1:1 clean-noisy correspondence for supervised training
+
+### Dataset Statistics
+
+| Domain | Unique Scenes | Clean/Noisy Pairs | Tiles per Image | Total Tiles | Tile Grid | Normalization Range |
+|--------|---------------|-------------------|-----------------|-------------|-----------|---------------------|
+| **Photography** | 424 | 424 (231 Sony + 193 Fuji) | 54 (Sony), 24 (Fuji) | 34,212 | Sony: 6×9<br>Fuji: 4×6 | [0, 15871] |
+| **Microscopy** | 619 | 619 | 16 | 19,808 | 4×4 | [0, 65535] |
+| **Astronomy** | 153 | 153 | 81 | 24,786 | 9×9 | [-65, 385] |
+| **TOTAL** | **1,196** | **1,196** | — | **78,806** | — | — |
+
+**Note**: Each domain maintains perfect 1:1 clean-noisy pairing (e.g., long/short exposure for photography, SIM_gt/RawSIMData for microscopy, detection/g800l for astronomy).
 
 ## Architecture Overview
 
@@ -39,14 +66,14 @@ A unified framework for low-light image restoration across photography, microsco
 
 ```
 Preprocessing (process_tiles_pipeline.py):
-Raw Sensor (ADU) → Physics Calibration (ADU→electrons) → Fixed Scaling ([0,~1]) → 256×256 tiles (.npy)
+Raw Sensor (ADU) → Physics Calibration (ADU→electrons) → Fixed Scaling ([0,~1]) → 256×256 tiles (.pt)
                          ↓                                        ↓                            ↓
                   Domain-specific gain/noise          Photography: ÷80000           Float32 precision
                                                      Microscopy: ÷66000            NO quantization
                                                      Astronomy: (+5.0)÷170         Metadata preserved
 
-Training Pipeline (train_npy_edm_native.py):
-Load .npy ([0,~1]) → Normalize to [-1,1] → EDM Diffusion → Physics Guidance → Train
+Training Pipeline (train_pt_edm_native.py):
+Load .pt ([0,~1]) → Normalize to [-1,1] → EDM Diffusion → Physics Guidance → Train
          ↓                    ↓                    ↓                  ↓              ↓
   Float32 tensor      x * 2 - 1           Native EDM loss    Poisson-Gaussian   Full precision
   CHW format          For EDM             + conditioning       noise model       No data loss
@@ -60,9 +87,9 @@ Noisy Input → Load & Normalize → EDM Sampling → Inverse Scaling → Denois
 
 ## Recent Implementation Highlights
 
-### Float32 .npy Training Pipeline (NVIDIA EDM)
+### Float32 .pt Training Pipeline (NVIDIA EDM)
 - **No Quantization**: Full float32 precision from sensor to training (no uint8 conversion)
-- **Direct Loading**: `np.load()` → `torch.from_numpy()` → EDM model (following NVIDIA EDM patterns)
+- **Direct Loading**: `torch.load()` → EDM model (following NVIDIA EDM patterns)
 - **Fixed Domain Scaling**: Physics-based normalization prevents per-image variation
   - Photography (Sony): gain 5.0 e⁻/ADU, scale by 80000
   - Photography (Fuji): gain 1.8 e⁻/ADU, scale by 80000
@@ -109,12 +136,12 @@ Jae/
 │   ├── transforms.py                 # Reversible image transforms with metadata
 │   └── logging_config.py            # Unified logging configuration
 ├── data/                              # Data loading and datasets
-│   └── npy_dataset.py                # Float32 .npy dataset loader (EDM-compatible)
+│   └── dataset.py                     # Float32 .pt dataset loader (EDM-compatible)
 ├── preprocessing/                     # Data preprocessing pipelines
 │   ├── process_tiles_pipeline.py     # Multi-domain tile extraction with physics calibration
 │   ├── domain_processors.py          # Domain-specific image loaders
 │   └── complete_systematic_tiling.py # Systematic tiling with overlap control
-├── train_npy_edm_native.py           # EDM native training with float32 .npy
+├── train_pt_edm_native.py            # EDM native training with float32 .pt
 ├── external/                          # External dependencies
 │   ├── edm/                          # NVIDIA EDM implementation
 │   └── README.md                     # Integration documentation
@@ -129,18 +156,30 @@ Jae/
 
 ## Development Status
 
+### Completed ✅
 - [x] Project specification and design
 - [x] External dependencies setup (EDM integration)
 - [x] Core infrastructure implementation
 - [x] Domain-specific physics calibration system
 - [x] Multi-domain preprocessing pipeline with fixed scaling
-- [x] Float32 .npy dataset loader (no quantization)
+- [x] Float32 .pt dataset loader (no quantization)
 - [x] EDM native training implementation
-- [x] Training data preparation for all domains
-- [ ] Complete cross-domain training run
-- [ ] Physics-guided sampling implementation
-- [ ] Cross-domain validation and evaluation
+- [x] Training data preparation for all domains (78,806 tiles)
+- [x] Photography single-domain model training
+- [x] Microscopy single-domain model training
+
+### In Progress 🚧
+- [ ] **Astronomy single-domain model training**
+- [ ] **Cross-domain generalization model** (joint training on all domains)
+- [ ] **Inference pipeline implementation** (physics-guided sampling)
+- [ ] **Baseline comparisons** (BM3D, Non-Local Means, DnCNN, Noise2Noise, etc.)
+
+### Future Work 📋
+- [ ] Cross-domain validation and metrics (PSNR, SSIM, domain-specific metrics)
+- [ ] Physics-guided sampling optimization
 - [ ] Comprehensive evaluation framework
+- [ ] Domain adaptation experiments
+- [ ] Real-world deployment pipeline
 
 ## Quick Start
 
@@ -154,7 +193,7 @@ python process_tiles_pipeline.py \
     --max_files None  # Process all files
 
 # Outputs:
-# - dataset/processed/npy_tiles/{domain}/{data_type}/*.npy
+# - dataset/processed/pt_tiles/{domain}/{data_type}/*.pt
 # - dataset/processed/comprehensive_tiles_metadata.json
 ```
 
@@ -202,7 +241,7 @@ python -c "import json; [print(json.dumps(json.loads(line), indent=2)) for line 
 ## Technical Details
 
 ### Data Format
-- **Storage**: Float32 .npy files (256×256 tiles)
+- **Storage**: Float32 .pt files (256×256 tiles)
 - **Channels**:
   - Photography: 3 channels (RGB)
   - Microscopy: 1 channel (grayscale)

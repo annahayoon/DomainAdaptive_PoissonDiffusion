@@ -86,7 +86,7 @@ logging:
 # Output configuration
 output:
   save_dir: "experiments/results"
-  save_format: "png"  # "png", "tiff", "npy"
+  save_format: "png"  # "png", "tiff", "pt"
   save_comparison: true  # Save noisy/restored side-by-side
 
 # System configuration
