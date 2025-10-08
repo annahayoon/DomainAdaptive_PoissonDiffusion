@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Training script for EDM with float32 .npy files (NO QUANTIZATION)
-# This script trains on full-precision 32-bit float numpy arrays
+# Training script for EDM with float32 .pt files (NO QUANTIZATION)
+# This script trains on full-precision 32-bit float PyTorch tensors
 # Conservative settings optimized for smaller dataset size
 # Uses more realistic parameters than default EDM settings
 # Includes split-screen GPU monitoring for real-time resource tracking
@@ -11,7 +11,7 @@
 #      ./run_edm_npy_train.sh
 #
 #   2. Resume training from existing directory:
-#      OUTPUT_DIR="results/edm_npy_training_20251007_081108" ./run_edm_npy_train.sh
+#      OUTPUT_DIR="results/edm_pt_training_20251007_081108" ./run_edm_npy_train.sh
 #      OR just run the script again - it auto-detects and resumes if checkpoints exist
 #
 #   3. Override output directory:
@@ -108,7 +108,7 @@ monitor_training() {
             echo -e "\033[2J\033[H"  # Clear screen and move cursor to top
 
             echo "╔════════════════════════════════════════════════════════════════╗"
-            echo "║            📊 GPU MONITORING DASHBOARD (NPY Float32)          ║"
+            echo "║            📊 GPU MONITORING DASHBOARD (PT Float32)           ║"
             echo "║════════════════════════════════════════════════════════════════║"
             printf "║  Iteration: %-8s  Time: %-15s                     ║\n" "$iteration" "$(date +'%H:%M:%S')"
             echo "║════════════════════════════════════════════════════════════════║"
@@ -151,7 +151,7 @@ monitor_training() {
             echo "╚════════════════════════════════════════════════════════════════╝"
 
             # Check if training is still running
-            if ! pgrep -f "train_npy_edm_native.py" > /dev/null; then
+            if ! pgrep -f "train_pt_edm_native.py" > /dev/null; then
                 echo "🎉 TRAINING COMPLETED - MONITORING STOPPED"
                 break
             fi
@@ -164,8 +164,8 @@ monitor_training() {
 }
 
 # Configuration
-DATA_ROOT="${DATA_ROOT:-dataset/processed/npy_tiles}"
-METADATA_JSON="${METADATA_JSON:-dataset/processed/tile_metadata.json}"
+DATA_ROOT="${DATA_ROOT:-dataset/processed/pt_tiles/microscopy/clean}"
+METADATA_JSON="${METADATA_JSON:-dataset/processed/metadata_microscopy_incremental.json}"
 
 # Output directory configuration
 # To resume training: Set OUTPUT_DIR to existing directory path
@@ -176,7 +176,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-}"  # Can be set via environment variable or left empt
 if [ -z "$OUTPUT_DIR" ]; then
     # Generate timestamp-based directory name
     TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-    OUTPUT_DIR="results/edm_npy_training_${TIMESTAMP}"
+    OUTPUT_DIR="results/edm_pt_training_microscopy_${TIMESTAMP}"
     echo "📁 Creating new training directory: $OUTPUT_DIR"
 elif [ ! -d "$OUTPUT_DIR" ]; then
     echo "📁 Directory does not exist, will create: $OUTPUT_DIR"
@@ -197,7 +197,7 @@ EARLY_STOPPING_PATIENCE=5   # Stop if no improvement for 5 validation checks (~1
 
 # Model architecture (ADM defaults from EDM)
 IMG_RESOLUTION=256
-CHANNELS=3              # 1 for grayscale, 3 for RGB
+CHANNELS=1              # 1 for grayscale, 3 for RGB
 MODEL_CHANNELS=192      # ADM default
 CHANNEL_MULT="1 2 3 4"  # ADM default
 LR=0.0001               # Learning rate
@@ -207,7 +207,7 @@ DEVICE="cuda"
 SEED=42
 
 echo "=================================================="
-echo "EDM Training with Float32 .npy Files"
+echo "EDM Training with Float32 .pt Files - MICROSCOPY"
 echo "NO QUANTIZATION - FULL PRECISION"
 echo "Conservative training to prevent overfitting"
 echo "=================================================="
@@ -224,7 +224,7 @@ echo "=================================================="
 echo "📊 SPLIT-SCREEN GPU MONITORING: ENABLED"
 echo "   Real-time GPU memory, CPU usage, and training status"
 echo "   Monitoring updates every 1 minute"
-echo "   Note: Float32 uses ~4x more memory than uint8"
+echo "   Note: Float32 tensors preserve full precision"
 echo "=================================================="
 
 # Check if required tools are available
@@ -293,7 +293,7 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 # Run training (Python script auto-detects and resumes from latest checkpoint)
-python3 train_npy_edm_native.py \
+python3 train_pt_edm_native_microscopy.py \
     --data_root "$DATA_ROOT" \
     --metadata_json "$METADATA_JSON" \
     --output_dir "$OUTPUT_DIR" \

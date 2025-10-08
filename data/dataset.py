@@ -1,11 +1,11 @@
 """
-NPY dataset loader for 32-bit float numpy arrays.
+PT dataset loader for 32-bit float PyTorch tensors.
 
-This module provides dataset classes for loading 32-bit float .npy files
+This module provides dataset classes for loading 32-bit float .pt files
 into the diffusion model training pipeline WITHOUT quantization.
 
 Key features:
-- Preserves full float32 precision (no 8-bit quantization)
+- Preserves full float32 precision
 - Compatible with EDM's training interface
 - Handles scientific imaging data (microscopy, astronomy, photography)
 - Supports metadata and calibration parameters
@@ -40,12 +40,12 @@ if TYPE_CHECKING:
     pass
 
 
-class EDMNPYDataset:
+class EDMPTDataset:
     """
-    EDM-compatible dataset for 32-bit float .npy files.
+    EDM-compatible dataset for 32-bit float .pt files.
 
     This dataset:
-    - Loads .npy files directly without quantization
+    - Loads .pt files directly without quantization
     - Preserves full float32 precision
     - Provides the interface expected by EDM's native training loop
     - Returns data in EDM-compatible format (float32 images + labels)
@@ -54,7 +54,7 @@ class EDMNPYDataset:
     Key difference from EDMPNGDataset:
     - No uint8 conversion - maintains float32 throughout
     - No 8-bit quantization loss
-    - Assumes .npy files are already normalized or in electron units
+    - Assumes .pt files are already normalized or in electron units
     """
 
     def __init__(
@@ -73,10 +73,10 @@ class EDMNPYDataset:
         **kwargs,
     ):
         """
-        Initialize EDM-compatible NPY dataset.
+        Initialize EDM-compatible PT dataset.
 
         Args:
-            data_root: Root directory containing .npy files
+            data_root: Root directory containing .pt files
             metadata_json: Metadata JSON file with predefined splits
             split: Data split (train, validation, test)
             max_files: Maximum number of files to load
@@ -125,7 +125,7 @@ class EDMNPYDataset:
                 f"Metadata JSON file not found: {self.metadata_json}"
             )
 
-        # Find .npy files and create mapping
+        # Find .pt files and create mapping
         self.image_files, self.noisy_mapping = self._find_paired_files()
         self.calibration_params = getattr(self, "calibration_params", {})
 
@@ -143,14 +143,14 @@ class EDMNPYDataset:
         self._xflip = np.zeros(len(self.split_files), dtype=np.uint8)
 
         # Set up dataset properties for EDM compatibility
-        self._name = f"npy_{split}"
+        self._name = f"pt_{split}"
 
         # Cache for loaded images
         self._cached_images = {}
         self._cache = False  # Enable caching if needed for speed
 
         logger.info(
-            f"EDMNPYDataset ready: {len(self.split_files)} float32 .npy tiles for '{split}' split - Domain: {self.domain}"
+            f"EDMPTDataset ready: {len(self.split_files)} float32 .pt tiles for '{split}' split - Domain: {self.domain}"
         )
         logger.info(f"  Data range: {self.data_range}")
         logger.info(f"  Shape: [{channels}, {image_size}, {image_size}]")
@@ -228,7 +228,7 @@ class EDMNPYDataset:
             return None
 
     def _find_paired_files(self) -> Tuple[List[Path], Dict[Path, Path]]:
-        """Find paired clean/noisy .npy files using metadata JSON file."""
+        """Find paired clean/noisy .pt files using metadata JSON file."""
         logger.info(f"Loading tile metadata from {self.metadata_json}")
 
         with open(self.metadata_json, "r") as f:
@@ -318,27 +318,27 @@ class EDMNPYDataset:
                 "electron_std": electron_std,
             }
 
-            # Look for .npy file instead of .png
+            # Look for .pt file
             # Try multiple possible paths
-            npy_path_candidates = [
-                # From metadata (if it stores npy_path)
-                Path(tile.get("npy_path", "")),
-                # Replace .png with .npy in png_path
-                Path(str(tile.get("png_path", "")).replace(".png", ".npy")),
+            pt_path_candidates = [
+                # From metadata (if it stores pt_path)
+                Path(tile.get("pt_path", "")),
+                # Replace .png with .pt in png_path
+                Path(str(tile.get("png_path", "")).replace(".png", ".pt")),
                 # Construct from data_root
-                self.data_root / f"{tile_id}.npy",
+                self.data_root / f"{tile_id}.pt",
                 # Try clean subdirectory
-                self.data_root / "clean" / f"{tile_id}.npy",
+                self.data_root / "clean" / f"{tile_id}.pt",
             ]
 
             clean_path = None
-            for candidate in npy_path_candidates:
+            for candidate in pt_path_candidates:
                 if candidate.exists():
                     clean_path = candidate
                     break
 
             if clean_path is None:
-                logger.debug(f"Clean .npy file not found for: {tile_id}")
+                logger.debug(f"Clean .pt file not found for: {tile_id}")
                 continue
 
             clean_files.append(clean_path)
@@ -349,20 +349,20 @@ class EDMNPYDataset:
                 if clean_path.parent.name == "clean"
                 else clean_path.parent
             )
-            noisy_path = clean_dir / "noisy" / f"{tile_id}.npy"
+            noisy_path = clean_dir / "noisy" / f"{tile_id}.pt"
 
             if noisy_path.exists():
                 noisy_mapping[clean_path] = noisy_path
             else:
-                logger.debug(f"No noisy .npy file found for {tile_id}")
+                logger.debug(f"No noisy .pt file found for {tile_id}")
 
         if not clean_files:
             raise FileNotFoundError(
-                f"No valid .npy files found for split '{self.split}'"
+                f"No valid .pt files found for split '{self.split}'"
             )
 
         logger.info(
-            f"✓ Loaded {len(clean_files)} CLEAN .npy tiles (float32) for '{self.split}' split"
+            f"✓ Loaded {len(clean_files)} CLEAN .pt tiles (float32) for '{self.split}' split"
         )
         logger.info(
             f"  └─ Calibration parameters: {len(self.calibration_params)} tiles"
@@ -408,14 +408,14 @@ class EDMNPYDataset:
         """
         Load raw image in EDM format (float32, CHW).
 
-        CRITICAL: Returns float32 arrays, NOT uint8!
-        This overrides EDM's default uint8 expectation.
+        CRITICAL: Returns float32 tensors already in [-1,1] range from pipeline!
+        The pipeline applies domain-specific scaling followed by [-1,1] normalization.
         """
         # Get image using integrated logic
-        npy_item = self._load_npy_item(raw_idx)
+        pt_item = self._load_pt_item(raw_idx)
 
-        # Extract clean image (already in float32, normalized or electron units)
-        clean_image = npy_item["clean"]
+        # Extract clean image (already in float32, [-1,1] normalized by pipeline)
+        clean_image = pt_item["clean"]
 
         # Convert to numpy and ensure float32 format
         image_np = (
@@ -436,15 +436,17 @@ class EDMNPYDataset:
             # Convert from HWC to CHW
             image_np = np.transpose(image_np, (2, 0, 1))
 
+        # Data is already in [-1,1] range from pipeline normalization
+        # No additional normalization needed
         return image_np
 
     def __len__(self):
         """Return dataset length."""
         return len(self.split_files)
 
-    def _load_npy_item(self, idx: int) -> Dict[str, Any]:
+    def _load_pt_item(self, idx: int) -> Dict[str, Any]:
         """
-        Load and process a clean .npy file.
+        Load and process a clean .pt file.
 
         Returns dict with:
             - 'clean': Clean image data (C, H, W) in float32 - used for training
@@ -456,8 +458,8 @@ class EDMNPYDataset:
         try:
             clean_path = self.split_files[idx]
 
-            # Load .npy file directly as float32
-            clean = self._load_npy_image_direct(clean_path)
+            # Load .pt file directly as float32
+            clean = self._load_pt_image_direct(clean_path)
 
             # Extract metadata
             metadata = {
@@ -468,7 +470,7 @@ class EDMNPYDataset:
             }
 
             # Get calibration parameters for this tile from metadata
-            tile_id = clean_path.name.replace(".npy", "")
+            tile_id = clean_path.name.replace(".pt", "")
             calib_params = self.calibration_params.get(tile_id, {})
 
             # Use electron statistics from metadata for physics-aware training
@@ -535,7 +537,7 @@ class EDMNPYDataset:
             }
 
         except Exception as e:
-            logger.warning(f"Error loading .npy file {idx}: {e}")
+            logger.warning(f"Error loading .pt file {idx}: {e}")
             # Return dummy data to prevent training crashes
             return {
                 "clean": torch.zeros(
@@ -558,39 +560,43 @@ class EDMNPYDataset:
                 "gain": torch.tensor([1.0], dtype=torch.float32),
             }
 
-    def _load_npy_image_direct(self, image_path: Path) -> torch.Tensor:
-        """Load a .npy file directly as float32 tensor."""
+    def _load_pt_image_direct(self, image_path: Path) -> torch.Tensor:
+        """Load a .pt file directly as float32 tensor.
+
+        The .pt files are already in [-1,1] range from the pipeline normalization.
+        """
         try:
-            # Load .npy file
-            image_np = np.load(str(image_path)).astype(np.float32)
+            # Load .pt file (already in [-1,1] range from pipeline)
+            tensor = torch.load(str(image_path), map_location="cpu")
+
+            # Ensure float32
+            if tensor.dtype != torch.float32:
+                tensor = tensor.to(torch.float32)
 
             # Validate shape
-            if image_np.ndim == 2:
+            if tensor.ndim == 2:
                 # Grayscale image (H, W)
-                if image_np.shape != (self.image_size, self.image_size):
+                if tensor.shape != (self.image_size, self.image_size):
                     logger.warning(
-                        f"Image shape {image_np.shape} doesn't match expected {(self.image_size, self.image_size)}"
+                        f"Image shape {tensor.shape} doesn't match expected {(self.image_size, self.image_size)}"
                     )
                 # Will be converted to (1, H, W) later
-            elif image_np.ndim == 3:
+            elif tensor.ndim == 3:
                 # Multi-channel image - could be (C, H, W) or (H, W, C)
-                if image_np.shape[0] in [1, 3]:  # CHW format
+                if tensor.shape[0] in [1, 3]:  # CHW format
                     expected_shape = (self.channels, self.image_size, self.image_size)
                 else:  # HWC format
                     expected_shape = (self.image_size, self.image_size, self.channels)
 
-                if image_np.shape != expected_shape and image_np.shape[:2] != (
+                if tensor.shape != expected_shape and tensor.shape[:2] != (
                     self.image_size,
                     self.image_size,
                 ):
                     logger.warning(
-                        f"Image shape {image_np.shape} doesn't match expected size {self.image_size}"
+                        f"Image shape {tensor.shape} doesn't match expected size {self.image_size}"
                     )
             else:
-                raise ValueError(f"Unexpected number of dimensions: {image_np.ndim}")
-
-            # Convert to PyTorch tensor
-            tensor = torch.from_numpy(image_np).float()
+                raise ValueError(f"Unexpected number of dimensions: {tensor.ndim}")
 
             # Ensure CHW format
             if tensor.ndim == 2:
@@ -600,11 +606,21 @@ class EDMNPYDataset:
                 # Convert HWC to CHW
                 tensor = tensor.permute(2, 0, 1)
 
+            # Data is already in [-1,1] range from pipeline normalization
+            # Verify the range is approximately correct
+            min_val = tensor.min().item()
+            max_val = tensor.max().item()
+            if min_val < -1.1 or max_val > 1.1:
+                logger.warning(
+                    f"Image {image_path.name} has unexpected range [{min_val:.3f}, {max_val:.3f}], "
+                    f"expected approximately [-1, 1]"
+                )
+
             return tensor
 
         except Exception as e:
-            logger.warning(f"Error loading .npy file {image_path}: {e}")
-            # Return dummy image
+            logger.warning(f"Error loading .pt file {image_path}: {e}")
+            # Return dummy image in [-1,1] range
             return torch.zeros(
                 self.channels, self.image_size, self.image_size, dtype=torch.float32
             )
@@ -613,8 +629,8 @@ class EDMNPYDataset:
         """
         Get item as (image, label) tuple for EDM compatibility.
 
-        CRITICAL: Returns float32 arrays, NOT uint8!
-        The training script will need to handle float32 data appropriately.
+        CRITICAL: Returns float32 tensors already in [-1,1] range from pipeline!
+        No additional normalization needed - data is ready for EDM training.
         """
         raw_idx = self._raw_idx[idx]
         image = self._cached_images.get(raw_idx, None)
@@ -630,6 +646,8 @@ class EDMNPYDataset:
             assert image.ndim == 3  # CHW
             image = image[:, :, ::-1]  # Flip horizontally
 
+        # Data is already in [-1,1] range from pipeline normalization
+        # Return as-is for EDM training
         return image.copy(), label
 
     @property
@@ -681,14 +699,14 @@ class EDMNPYDataset:
 
     def get_calibration_params(self, idx):
         """Get calibration parameters for a specific index."""
-        return self._load_npy_item(idx).get("domain_params", {})
+        return self._load_pt_item(idx).get("domain_params", {})
 
     def close(self):
         """Clean up resources."""
         pass
 
 
-def create_edm_npy_datasets(
+def create_edm_pt_datasets(
     data_root: Union[str, Path],
     metadata_json: Union[str, Path],
     domain: Optional[str] = None,  # Must specify for comprehensive metadata files
@@ -700,12 +718,12 @@ def create_edm_npy_datasets(
     channels: int = 3,
     label_dim: int = 3,
     data_range: str = "normalized",
-) -> Tuple[EDMNPYDataset, EDMNPYDataset]:
+) -> Tuple[EDMPTDataset, EDMPTDataset]:
     """
-    Create EDM-compatible training and validation datasets from .npy files.
+    Create EDM-compatible training and validation datasets from .pt files.
 
     Args:
-        data_root: Root directory containing .npy files
+        data_root: Root directory containing .pt files
         metadata_json: Metadata JSON file with predefined splits
         domain: Domain name ('photography', 'microscopy', 'astronomy'). Required for comprehensive metadata files.
         train_split: Training split name
@@ -722,7 +740,7 @@ def create_edm_npy_datasets(
     """
     # Auto-detect domain if not provided and metadata supports it
     if domain is None:
-        detected_domain = EDMNPYDataset._detect_domain_from_metadata_static(
+        detected_domain = EDMPTDataset._detect_domain_from_metadata_static(
             metadata_json
         )
         if detected_domain is None:
@@ -732,7 +750,7 @@ def create_edm_npy_datasets(
             )
         domain = detected_domain
 
-    logger.info(f"Creating EDM-compatible NPY datasets for {domain}")
+    logger.info(f"Creating EDM-compatible PT datasets for {domain}")
     logger.info(f"Data root: {data_root}")
     logger.info(f"Image size: {image_size}x{image_size}")
     logger.info(f"Channels: {channels}")
@@ -740,7 +758,7 @@ def create_edm_npy_datasets(
     logger.info(f"Data range: {data_range}")
 
     # Create training dataset
-    train_dataset = EDMNPYDataset(
+    train_dataset = EDMPTDataset(
         data_root=data_root,
         metadata_json=metadata_json,
         split=train_split,
@@ -756,7 +774,7 @@ def create_edm_npy_datasets(
 
     # Create validation dataset
     val_max_files = max_files // 5 if max_files else None  # Use 20% for validation
-    val_dataset = EDMNPYDataset(
+    val_dataset = EDMPTDataset(
         data_root=data_root,
         metadata_json=metadata_json,
         split=val_split,
@@ -770,7 +788,7 @@ def create_edm_npy_datasets(
         data_range=data_range,
     )
 
-    logger.info(f"✅ Created EDM-compatible NPY datasets (float32, no quantization):")
+    logger.info(f"✅ Created EDM-compatible PT datasets (float32, no quantization):")
     logger.info(f"  Training: {len(train_dataset)} samples")
     logger.info(f"  Validation: {len(val_dataset)} samples")
     logger.info(f"  Resolution: {train_dataset.resolution}x{train_dataset.resolution}")

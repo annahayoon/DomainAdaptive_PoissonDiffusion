@@ -4,24 +4,20 @@ Unified Tiles Pipeline with Domain-Specific Calibration
 Domain-specific physics-based calibration methods
 """
 
-import io
 import json
 import logging
 import os
-import pickle  # nosec B403 - Safe pickle usage for metadata serialization
 import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torchvision.transforms as transforms
 from complete_systematic_tiling import SystematicTiler, SystematicTilingConfig
-
-# Import domain processors and tiling
-from domain_processors import create_processor
-from PIL import Image
 
 # Setup logging first
 logging.basicConfig(
@@ -92,62 +88,107 @@ class SimpleTilesPipeline:
             "astronomy": 2.0,  # Astronomy: 4232×4220 → 2116×2110 → 9×9 = 81 tiles (maintains aspect ratio)
         }
 
-        # Fixed scaling factors per domain (EDM-compatible, 99.9th %ile ≤ 1.0)
-        # Ensures 99.9% of pixels ≤ 1.0 for EDM training (prevents convergence issues)
-        self.fixed_scales = {
-            "astronomy": 170.0,  # 99.9th %ile = 168.3, ensures max ≤ 1.0 for EDM
-            "microscopy": 66000.0,  # 99.9th %ile = 65533.5, ensures max ≤ 1.0 for EDM
-            "photography": 80000.0,  # 99.9th %ile = 79351.4, ensures max ≤ 1.0 for EDM
+        # Domain-specific normalization ranges based on pixel distribution analysis
+        # These ranges come from domain_pixel_distribution.md comprehensive analysis
+        # Used for consistent [-1,1] normalization across all domains for EDM training
+        self.domain_ranges = {
+            "astronomy": {"min": -65.00, "max": 385.00},  # Updated astronomy range
+            "microscopy": {"min": 0.00, "max": 65535.00},  # Microscopy range (16-bit)
+            "photography": {"min": 0.00, "max": 15871.00},  # Photography range
         }
 
-    def prepare_tile_data(
-        self, tile_data: np.ndarray
-    ) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Prepare tile data for storage as float32 .npy (preserves full precision)"""
-
+    def load_photography_raw(self, file_path: str) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Load photography raw file using rawpy and convert to RGGB format"""
         try:
-            if len(tile_data.shape) == 2:
-                tile_data = tile_data[np.newaxis, :, :]
+            import rawpy
 
-            tile_data = np.ascontiguousarray(tile_data.astype(np.float32))
+            with rawpy.imread(file_path) as raw:
+                # Get raw Bayer data
+                bayer = raw.raw_image_visible.astype(np.float32)
 
-            original_shape = tile_data.shape
-            channels = original_shape[0]
+                # Extract black level and white level
+                black_level = np.array(raw.black_level_per_channel)
+                white_level = raw.white_level
 
-            storage_info = {
-                "method": "npy_float32",
-                "stored_size": tile_data.nbytes,
-                "shape": original_shape,
-                "dtype": str(tile_data.dtype),
-                "channels": channels,
-            }
+                # Pack Bayer to 4-channel RGGB format
+                packed = self._pack_bayer_to_4channel(bayer, black_level)
 
-            return tile_data, storage_info
-
+                metadata = {
+                    "black_level": black_level,
+                    "white_level": white_level,
+                    "camera_model": getattr(raw, "camera", "Unknown"),
+                    "iso": getattr(raw, "iso", None),
+                    "exposure_time": getattr(raw, "exposure_time", None),
+                    "file_path": file_path,
+                }
+            return packed, metadata
         except Exception as e:
-            logger.error(f"Tile preparation failed: {e}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            error_info = {
-                "method": "failed",
-                "stored_size": 0,
-                "error": str(e),
+            logger.error(f"Error loading photography file {file_path}: {e}")
+            return None, None
+
+    def _pack_bayer_to_4channel(
+        self, bayer: np.ndarray, black_level: np.ndarray
+    ) -> np.ndarray:
+        """Convert Bayer pattern to 4-channel packed format"""
+        H, W = bayer.shape
+
+        # Create black level map
+        black_map = np.zeros((H, W), dtype=np.float32)
+        black_map[0::2, 0::2] = black_level[0]  # R
+        black_map[0::2, 1::2] = black_level[1]  # G1
+        black_map[1::2, 0::2] = black_level[2]  # G2
+        black_map[1::2, 1::2] = black_level[3]  # B
+
+        # Subtract black level
+        bayer_corrected = np.maximum(bayer - black_map, 0)
+
+        # Pack to 4-channel
+        packed = np.zeros((4, H // 2, W // 2), dtype=np.float32)
+        packed[0] = bayer_corrected[0::2, 0::2]  # R
+        packed[1] = bayer_corrected[0::2, 1::2]  # G1
+        packed[2] = bayer_corrected[1::2, 0::2]  # G2
+        packed[3] = bayer_corrected[1::2, 1::2]  # B
+
+        return packed
+
+    def load_astronomy_raw(self, file_path: str) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Load astronomy FITS file"""
+        try:
+            from astropy.io import fits
+
+            with fits.open(file_path) as hdul:
+                data = hdul[0].data.astype(np.float32)
+                header = dict(hdul[0].header)
+
+            # Add channel dimension if needed
+            if len(data.shape) == 2:
+                data = data[np.newaxis, :, :]
+
+            metadata = {
+                "telescope": header.get("TELESCOP", "HST"),
+                "instrument": header.get("INSTRUME", "ACS"),
+                "detector": header.get("DETECTOR", "WFC"),
+                "filter": header.get("FILTER", "CLEAR"),
+                "exposure_time": header.get("EXPTIME", 0.0),
+                "full_header": header,
+                "file_path": file_path,
             }
-            return None, error_info
+            return data, metadata
+        except Exception as e:
+            logger.error(f"Error loading astronomy file {file_path}: {e}")
+            return None, None
 
     def demosaic_rggb_to_rgb(
         self,
         rggb_image: np.ndarray,
-        gains: np.ndarray = None,
-        camera_type: str = "generic",
     ):
         """
         Demosaic RGGB Bayer pattern to RGB (no white balance correction)
         Works for both Sony and Fuji cameras since they both use RGGB Bayer patterns
+        Based on create_raw_comparison.py implementation
 
         Args:
             rggb_image: RGGB image with shape (4, H, W) - [R, G1, G2, B]
-            gains: Ignored (no white balance correction)
-            camera_type: Camera type ("sony", "fuji", or "generic") - ignored for demosaicing
         Returns:
             RGB image with shape (3, H, W) - [R, G, B]
         """
@@ -161,26 +202,371 @@ class SimpleTilesPipeline:
         G2 = rggb_image[2]  # Green channel 2
         B = rggb_image[3]  # Blue channel
 
+        # Average the two green channels
         G = (G1 + G2) / 2.0
         rgb_image = np.stack([R, G, B], axis=0)
 
         return rgb_image
 
-    def save_tile_as_npy(
+    def get_pixel_stats(self, data):
+        """Get pixel statistics (min, max, mean, median) from data"""
+        if data is None:
+            return "N/A", "N/A", "N/A", "N/A"
+
+        # Handle different data shapes
+        if len(data.shape) == 3:
+            flat_data = data.flatten()
+        else:
+            flat_data = data.flatten()
+
+        # Remove NaN and infinite values
+        valid_mask = np.isfinite(flat_data)
+        if not np.any(valid_mask):
+            return "N/A", "N/A", "N/A", "N/A"
+
+        valid_data = flat_data[valid_mask]
+        min_val = np.min(valid_data)
+        max_val = np.max(valid_data)
+        mean_val = np.mean(valid_data)
+        median_val = np.median(valid_data)
+
+        return min_val, max_val, mean_val, median_val
+
+    def normalize_for_display(self, data, percentile_range=(1, 99)):
+        """Normalize data for display using percentile clipping"""
+        if data is None:
+            return None
+
+        # Handle different data shapes
+        if len(data.shape) == 3:
+            if data.shape[0] == 3:  # RGB format
+                # Convert RGB to grayscale for display
+                display_data = np.mean(data, axis=0)
+            elif data.shape[0] == 4:  # RGGB format
+                # Demosaic RGGB to RGB first, then convert to grayscale
+                rgb_data = self.demosaic_rggb_to_rgb(data)
+                display_data = np.mean(rgb_data, axis=0)
+            else:
+                display_data = data.mean(axis=0)
+        else:
+            display_data = data
+
+        # Ensure we have 2D data for display
+        if len(display_data.shape) != 2:
+            logger.warning(
+                f"Expected 2D data for display, got shape {display_data.shape}"
+            )
+            return None
+
+        # Remove NaN and infinite values
+        valid_mask = np.isfinite(display_data)
+        if not np.any(valid_mask):
+            return None
+
+        # Clip to percentiles and normalize to [0, 1]
+        p_low, p_high = np.percentile(display_data[valid_mask], percentile_range)
+        clipped = np.clip(display_data, p_low, p_high)
+        normalized = (clipped - p_low) / (p_high - p_low)
+
+        return normalized
+
+    def extract_single_tile_for_viz(
+        self, image, tile_size=256, preserve_intensity=True
+    ):
+        """Extract a single tile from the image for visualization purposes"""
+        if len(image.shape) == 3:
+            C, H, W = image.shape
+        else:
+            H, W = image.shape
+            C = 1
+            image = image[np.newaxis, :, :]
+
+        if preserve_intensity:
+            # Find the region with maximum intensity
+            if C == 4:  # RGGB
+                intensity = np.mean(image, axis=0)
+            elif C == 3:  # RGB
+                intensity = np.mean(image, axis=0)
+            else:  # Grayscale
+                intensity = image[0]
+
+            # Find maximum intensity location
+            max_y, max_x = np.unravel_index(np.argmax(intensity), intensity.shape)
+
+            # Calculate tile bounds around maximum intensity point
+            y_start = max(0, max_y - tile_size // 2)
+            y_end = min(H, y_start + tile_size)
+            x_start = max(0, max_x - tile_size // 2)
+            x_end = min(W, x_start + tile_size)
+
+            # Adjust if we hit boundaries
+            if y_end - y_start < tile_size:
+                y_start = max(0, y_end - tile_size)
+            if x_end - x_start < tile_size:
+                x_start = max(0, x_end - tile_size)
+        else:
+            # Center-based extraction
+            center_y = H // 2
+            center_x = W // 2
+
+            y_start = max(0, center_y - tile_size // 2)
+            y_end = min(H, y_start + tile_size)
+            x_start = max(0, center_x - tile_size // 2)
+            x_end = min(W, x_start + tile_size)
+
+        # Extract tile
+        tile = image[:, y_start:y_end, x_start:x_end]
+
+        # Pad if necessary
+        if tile.shape[1] != tile_size or tile.shape[2] != tile_size:
+            padded_tile = np.zeros((C, tile_size, tile_size), dtype=tile.dtype)
+            padded_tile[:, : tile.shape[1], : tile.shape[2]] = tile
+            tile = padded_tile
+
+        return tile
+
+    def create_scene_visualization(self, viz_data: Dict[str, Any], output_dir: Path):
+        """Create 4-step visualization for a single scene (one noisy + one clean pair)"""
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            domain = viz_data["domain"]
+            scene_id = viz_data["scene_id"]
+            noisy_data = viz_data["noisy"]
+            clean_data = viz_data["clean"]
+
+            # Create figure with 4x2 subplots (4 steps x 2 images)
+            fig, axes = plt.subplots(4, 2, figsize=(12, 24))
+
+            # Step 1: Raw loading - NO percentile normalization, just min-max scaling
+            noisy_raw_data = noisy_data.get("raw_image")
+            clean_raw_data = clean_data.get("raw_image")
+
+            noisy_min, noisy_max, noisy_mean, noisy_median = self.get_pixel_stats(
+                noisy_raw_data
+            )
+            clean_min, clean_max, clean_mean, clean_median = self.get_pixel_stats(
+                clean_raw_data
+            )
+
+            # Simple min-max normalization for display (no percentile clipping)
+            def simple_normalize(data):
+                if data is None:
+                    return None
+                # Handle multi-channel data
+                if len(data.shape) == 3:
+                    if data.shape[0] == 3:  # RGB
+                        display_data = np.mean(data, axis=0)
+                    elif data.shape[0] == 4:  # RGGB
+                        rgb_data = self.demosaic_rggb_to_rgb(data)
+                        display_data = np.mean(rgb_data, axis=0)
+                    else:
+                        display_data = data.mean(axis=0)
+                else:
+                    display_data = data
+                # Min-max normalize
+                data_min, data_max = np.min(display_data), np.max(display_data)
+                if data_max - data_min > 0:
+                    return (display_data - data_min) / (data_max - data_min)
+                return display_data
+
+            noisy_raw = simple_normalize(noisy_raw_data)
+            clean_raw = simple_normalize(clean_raw_data)
+
+            if noisy_raw is not None:
+                axes[0, 0].imshow(noisy_raw, cmap="gray", vmin=0, vmax=1)
+                axes[0, 0].set_title(
+                    f'{domain.capitalize()} - Noisy Raw\nShape: {noisy_data.get("original_shape")}\n[{noisy_min:.3f}, {noisy_max:.3f}] μ={noisy_mean:.3f} m={noisy_median:.3f}'
+                )
+            axes[0, 0].axis("off")
+
+            if clean_raw is not None:
+                axes[0, 1].imshow(clean_raw, cmap="gray", vmin=0, vmax=1)
+                axes[0, 1].set_title(
+                    f'{domain.capitalize()} - Clean Raw\nShape: {clean_data.get("original_shape")}\n[{clean_min:.3f}, {clean_max:.3f}] μ={clean_mean:.3f} m={clean_median:.3f}'
+                )
+            axes[0, 1].axis("off")
+
+            # Step 2: After tiling - NO percentile normalization
+            noisy_tiled_data = noisy_data.get("tiled_image")
+            clean_tiled_data = clean_data.get("tiled_image")
+
+            (
+                noisy_tiled_min,
+                noisy_tiled_max,
+                noisy_tiled_mean,
+                noisy_tiled_median,
+            ) = self.get_pixel_stats(noisy_tiled_data)
+            (
+                clean_tiled_min,
+                clean_tiled_max,
+                clean_tiled_mean,
+                clean_tiled_median,
+            ) = self.get_pixel_stats(clean_tiled_data)
+
+            noisy_tiled = simple_normalize(noisy_tiled_data)
+            clean_tiled = simple_normalize(clean_tiled_data)
+
+            if noisy_tiled is not None:
+                axes[1, 0].imshow(noisy_tiled, cmap="gray", vmin=0, vmax=1)
+                domain_range = self.domain_ranges[domain]
+                axes[1, 0].set_title(
+                    f'{domain.capitalize()} - Noisy Tiled\nDomain Range: [{domain_range["min"]:.3f}, {domain_range["max"]:.3f}]\nShape: {noisy_tiled_data.shape}\n[{noisy_tiled_min:.3f}, {noisy_tiled_max:.3f}] μ={noisy_tiled_mean:.3f} m={noisy_tiled_median:.3f}'
+                )
+            axes[1, 0].axis("off")
+
+            if clean_tiled is not None:
+                axes[1, 1].imshow(clean_tiled, cmap="gray", vmin=0, vmax=1)
+                domain_range = self.domain_ranges[domain]
+                axes[1, 1].set_title(
+                    f'{domain.capitalize()} - Clean Tiled\nDomain Range: [{domain_range["min"]:.3f}, {domain_range["max"]:.3f}]\nShape: {clean_tiled_data.shape}\n[{clean_tiled_min:.3f}, {clean_tiled_max:.3f}] μ={clean_tiled_mean:.3f} m={clean_tiled_median:.3f}'
+                )
+            axes[1, 1].axis("off")
+
+            # Step 3: After domain normalization [min,max] -> [0,1] - NO percentile normalization
+            noisy_domain_norm_data = noisy_data.get("domain_normalized")
+            clean_domain_norm_data = clean_data.get("domain_normalized")
+
+            (
+                noisy_norm_min,
+                noisy_norm_max,
+                noisy_norm_mean,
+                noisy_norm_median,
+            ) = self.get_pixel_stats(noisy_domain_norm_data)
+            (
+                clean_norm_min,
+                clean_norm_max,
+                clean_norm_mean,
+                clean_norm_median,
+            ) = self.get_pixel_stats(clean_domain_norm_data)
+
+            noisy_domain_norm = simple_normalize(noisy_domain_norm_data)
+            clean_domain_norm = simple_normalize(clean_domain_norm_data)
+
+            if noisy_domain_norm is not None:
+                axes[2, 0].imshow(noisy_domain_norm, cmap="gray", vmin=0, vmax=1)
+                domain_range = self.domain_ranges[domain]
+                axes[2, 0].set_title(
+                    f'{domain.capitalize()} - Noisy Domain Normalized\n[{domain_range["min"]:.3f}, {domain_range["max"]:.3f}] -> [0,1]\nShape: {noisy_domain_norm_data.shape}\n[{noisy_norm_min:.6f}, {noisy_norm_max:.6f}] μ={noisy_norm_mean:.6f} m={noisy_norm_median:.6f}'
+                )
+            axes[2, 0].axis("off")
+
+            if clean_domain_norm is not None:
+                axes[2, 1].imshow(clean_domain_norm, cmap="gray", vmin=0, vmax=1)
+                domain_range = self.domain_ranges[domain]
+                axes[2, 1].set_title(
+                    f'{domain.capitalize()} - Clean Domain Normalized\n[{domain_range["min"]:.3f}, {domain_range["max"]:.3f}] -> [0,1]\nShape: {clean_domain_norm_data.shape}\n[{clean_norm_min:.6f}, {clean_norm_max:.6f}] μ={clean_norm_mean:.6f} m={clean_norm_median:.6f}'
+                )
+            axes[2, 1].axis("off")
+
+            # Step 4: After tensor conversion [-1,1]
+            noisy_tensor = noisy_data.get("tensor")
+            clean_tensor = clean_data.get("tensor")
+
+            (
+                noisy_tensor_min,
+                noisy_tensor_max,
+                noisy_tensor_mean,
+                noisy_tensor_median,
+            ) = self.get_pixel_stats(
+                noisy_tensor.numpy() if noisy_tensor is not None else None
+            )
+            (
+                clean_tensor_min,
+                clean_tensor_max,
+                clean_tensor_mean,
+                clean_tensor_median,
+            ) = self.get_pixel_stats(
+                clean_tensor.numpy() if clean_tensor is not None else None
+            )
+
+            if noisy_tensor is not None:
+                # For VISUALIZATION ONLY: Apply percentile normalization
+                noisy_tensor_display = self.normalize_for_display(
+                    noisy_tensor.numpy(), percentile_range=(1, 99)
+                )
+                axes[3, 0].imshow(noisy_tensor_display, cmap="gray")
+                axes[3, 0].set_title(
+                    f"{domain.capitalize()} - Noisy Tensor [-1,1]\nShape: {noisy_tensor.shape}, dtype: {noisy_tensor.dtype}\nActual range: [{noisy_tensor_min:.6f}, {noisy_tensor_max:.6f}] μ={noisy_tensor_mean:.6f}\n(Display: percentile normalized for visibility)"
+                )
+            axes[3, 0].axis("off")
+
+            if clean_tensor is not None:
+                # For VISUALIZATION ONLY: Apply percentile normalization
+                clean_tensor_display = self.normalize_for_display(
+                    clean_tensor.numpy(), percentile_range=(1, 99)
+                )
+                axes[3, 1].imshow(clean_tensor_display, cmap="gray")
+                axes[3, 1].set_title(
+                    f"{domain.capitalize()} - Clean Tensor [-1,1]\nShape: {clean_tensor.shape}, dtype: {clean_tensor.dtype}\nActual range: [{clean_tensor_min:.6f}, {clean_tensor_max:.6f}] μ={clean_tensor_mean:.6f}\n(Display: percentile normalized for visibility)"
+                )
+            axes[3, 1].axis("off")
+
+            # Add column labels
+            fig.text(
+                0.25, 0.95, "Noisy Samples", ha="center", fontsize=14, fontweight="bold"
+            )
+            fig.text(
+                0.75, 0.95, "Clean Samples", ha="center", fontsize=14, fontweight="bold"
+            )
+
+            # Add row labels
+            row_labels = [
+                "Raw Loading",
+                "After Tiling",
+                "Domain Normalization [min,max]->[0,1]",
+                "After Tensor Conversion [-1,1]",
+            ]
+            for j, label in enumerate(row_labels):
+                fig.text(
+                    0.02,
+                    0.8 - j * 0.2,
+                    label,
+                    ha="left",
+                    va="center",
+                    fontsize=12,
+                    fontweight="bold",
+                    rotation=90,
+                )
+
+            # Add overall title
+            fig.suptitle(
+                f"Domain: {domain.capitalize()} - Scene: {scene_id}",
+                fontsize=16,
+                fontweight="bold",
+            )
+
+            # Save the plot
+            safe_scene_id = scene_id.replace("/", "_").replace(":", "_")
+            output_path = output_dir / f"{domain}_{safe_scene_id}_steps.png"
+            plt.tight_layout()
+            plt.subplots_adjust(top=0.9, left=0.1, right=0.95)
+            plt.savefig(output_path, dpi=150, bbox_inches="tight")
+            plt.close()
+
+            logger.info(f"📊 Saved visualization: {output_path}")
+            return str(output_path)
+
+        except Exception as e:
+            logger.error(f"Failed to create visualization: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return None
+
+    def save_tile_as_pt(
         self,
         tile_data: np.ndarray,
         tile_id: str,
         domain: str,
         data_type: str,
-        gain: float,
-        read_noise: float,
-        calibration_method: str,
+        domain_range: Dict[str, float],
     ) -> Dict[str, Any]:
-        """Save tile as .npy file and return metadata
+        """Save tile as .pt file and return metadata
 
         Photography: Saves as RGB (3, 256, 256) float32
         Microscopy: Saves as grayscale (1, 256, 256) float32
         Astronomy: Saves as grayscale (1, 256, 256) float32
+
+        Normalization: [domain_min, domain_max] → [0,1] → [-1,1]
         """
         try:
             # Ensure proper shape
@@ -188,7 +574,7 @@ class SimpleTilesPipeline:
                 tile_data = tile_data[np.newaxis, :, :]
 
             # Create output directory
-            output_dir = self.base_path / "processed" / "npy_tiles" / domain / data_type
+            output_dir = self.base_path / "processed" / "pt_tiles" / domain / data_type
             output_dir.mkdir(parents=True, exist_ok=True)
 
             # Handle domain-specific channel requirements
@@ -233,51 +619,73 @@ class SimpleTilesPipeline:
                     f"Tile shape mismatch for {domain}: {tile_data.shape} != {expected_shape}"
                 )
 
-            npy_path = output_dir / f"{tile_id}.npy"
-            np.save(npy_path, tile_data.astype(np.float32))
+            pt_path = output_dir / f"{tile_id}.pt"
+
+            # Apply domain-specific normalization: [domain_min, domain_max] → [0,1] → [-1,1]
+            # This matches the logic in process_tiles_test.py
+            domain_min = domain_range["min"]
+            domain_max = domain_range["max"]
+
+            # Step 1: Normalize to [0,1] using domain range
+            normalized_tile = (tile_data - domain_min) / (domain_max - domain_min)
+            normalized_tile = np.clip(normalized_tile, 0, 1)
+
+            # Step 2: Convert to tensor and normalize to [-1,1]
+            tensor_data = torch.from_numpy(normalized_tile.astype(np.float32))
+            tensor_data = 2 * tensor_data - 1  # [0,1] → [-1,1]
+
+            # Save as PyTorch tensor
+            torch.save(tensor_data, pt_path)
 
             # Return metadata
             return {
                 "tile_id": tile_id,
-                "npy_path": str(npy_path),
+                "pt_path": str(pt_path),
                 "domain": domain,
                 "data_type": data_type,
-                "gain": gain,
-                "read_noise": read_noise,
-                "calibration_method": calibration_method,
+                "domain_range": domain_range,
                 "tile_size": self.tile_size,
                 "channels": actual_channels,
                 "processing_timestamp": datetime.now().isoformat(),
             }
 
         except Exception as e:
-            logger.error(f"Failed to save tile as .npy: {e}")
+            logger.error(f"Failed to save tile as .pt: {e}")
             return None
 
-    def process_file_to_npy_tiles(
-        self, file_path: str, domain: str
-    ) -> List[Dict[str, Any]]:
-        """Process a single file to .npy tiles with physics calibration and fixed scaling - CORRECT FLOW: Calibrate→FixedScale→Tile"""
+    def process_file_to_pt_tiles(
+        self, file_path: str, domain: str, create_viz: bool = False
+    ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Process a single file to .pt tiles with domain-specific normalization - CORRECT FLOW: Load→Tile→Normalize
+
+        Args:
+            file_path: Path to the file to process
+            domain: Domain name (photography/microscopy/astronomy)
+            create_viz: If True, collect intermediate data for visualization
+
+        Returns:
+            Tuple of (processed_tiles, viz_data) where viz_data is None unless create_viz=True
+        """
         try:
             logger.info(f"Processing {domain} file: {Path(file_path).name}")
 
-            # Initialize processor
-            processor = create_processor(domain)
-
-            # === STEP 1: Load full image ===
-            if domain == "microscopy" and file_path.lower().endswith(".mrc"):
+            # === STEP 1: Load full image using simplified loaders ===
+            if domain == "photography":
+                image, metadata = self.load_photography_raw(file_path)
+            elif domain == "microscopy":
                 image, metadata = self.load_microscopy_mrc(file_path)
+            elif domain == "astronomy":
+                image, metadata = self.load_astronomy_raw(file_path)
             else:
-                image, metadata = processor.load_image(file_path)
+                logger.warning(f"Unknown domain: {domain}")
+                return []
 
             if image is None or image.size == 0:
                 logger.warning(f"Empty or invalid image: {file_path}")
                 return []
 
-            # Add file path to metadata for calibration
+            # Add file path to metadata
             metadata["file_path"] = file_path
-
-            # Image loaded successfully
 
             # === STEP 1.5: Apply domain-specific downsampling ===
             if domain == "photography":
@@ -298,21 +706,14 @@ class SimpleTilesPipeline:
                 # Use proper downsampling with anti-aliasing (better for diffusion training)
                 image = self._downsample_with_antialiasing(image, downsample_factor)
 
-                # Image downsampled with anti-aliasing
-
             elif domain == "microscopy":
                 # Apply microscopy downsampling (factor 1.0 = no downsampling)
                 downsample_factor = self.downsample_factors["microscopy"]
                 if downsample_factor != 1.0:
                     original_shape = image.shape
                     image = self._downsample_with_antialiasing(image, downsample_factor)
-                    logger.info(
-                        f"🔬 Microscopy downsampled: {original_shape} → {image.shape} (factor: {downsample_factor:.2f}x)"
-                    )
                 else:
-                    logger.info(
-                        f"🔬 Microscopy: no downsampling needed (factor: {downsample_factor:.2f}x)"
-                    )
+                    pass
 
             elif domain == "astronomy":
                 # Apply astronomy downsampling while maintaining aspect ratio
@@ -335,86 +736,67 @@ class SimpleTilesPipeline:
                         new_H, new_W = image.shape[1], image.shape[2]
                     else:
                         new_H, new_W = image.shape[0], image.shape[1]
-                    logger.info(
-                        f"🌟 Astronomy downsampled: {original_shape} → {image.shape} (factor: {downsample_factor:.2f}x)"
-                    )
-                    logger.info(
-                        f"   Aspect ratio preserved: {W/H:.3f} → {new_W/new_H:.3f}"
-                    )
                 else:
-                    logger.info(
-                        f"🌟 Astronomy image already at target size or smaller: {image.shape}"
-                    )
+                    pass
 
-            # === STEP 2: Apply domain-specific calibration to FULL image ===
-            gain, read_noise, calibration_method = self._get_physics_based_calibration(
-                domain, metadata
-            )
-            # Applying domain-specific calibration
-
+            # === STEP 2: Apply domain-specific normalization ===
             # Store original data range for reference
             orig_min = float(np.min(image))
             orig_max = float(np.max(image))
+            orig_mean = float(np.mean(image))
+            orig_std = float(np.std(image))
 
-            # Apply physics-based calibration: ADU → electrons
-            calibrated_image = self._apply_physics_calibration(
-                image, gain, read_noise, domain
-            )
-            # Physics calibration applied
+            # Get domain-specific normalization range
+            domain_range = self.domain_ranges.get(domain, {"min": 0.0, "max": 1000.0})
 
-            # Store electron range for physics analysis
-            electron_min = float(np.min(calibrated_image))
-            electron_max = float(np.max(calibrated_image))
-            electron_mean = float(np.mean(calibrated_image))
-            electron_std = float(np.std(calibrated_image))
+            # Initialize visualization data if requested
+            viz_data = None
+            viz_tile = None
 
-            # === STEP 3: Apply domain-specific FIXED scaling ===
-            fixed_scale = self.fixed_scales.get(domain, 1000.0)
+            if create_viz:
+                # Store raw image for visualization
+                viz_data = {
+                    "raw_image": image.copy(),
+                    "original_shape": image.shape,
+                }
 
-            if domain == "astronomy":
-                # For astronomy: offset by read noise, then scale
-                # electron_mean~-3.5, so we add offset to center around 0
-                scaled_image = (calibrated_image + 5.0) / fixed_scale
-                logger.info(
-                    f"   ✅ Astronomy: fixed scaling with offset +5.0, scale {fixed_scale}"
+                # Extract one representative tile for visualization
+                viz_tile = self.extract_single_tile_for_viz(
+                    image, tile_size=256, preserve_intensity=True
                 )
-            else:
-                # For photography and microscopy: simple division by fixed scale
-                scaled_image = calibrated_image / fixed_scale
-                logger.info(
-                    f"   ✅ {domain.capitalize()}: fixed scaling by {fixed_scale}"
-                )
+                viz_data["tiled_image"] = viz_tile.copy()
 
-            # NO CLIPPING - preserve full physics for cross-domain generalization
-            # Data should naturally fall in [0, ~0.9] range based on physics-preserving scales
+            # NO NORMALIZATION YET - tiles will be normalized individually when saved
+            # This preserves the raw pixel values for tiling
+            # Normalization happens in save_tile_as_pt: [domain_min, domain_max] → [0,1] → [-1,1]
 
-            # === STEP 4: NOW tile the calibrated image ===
+            # === STEP 3: NOW tile the raw image ===
             # Convert to CHW format if needed (tiler expects this)
-            if len(scaled_image.shape) == 2:
-                scaled_image = scaled_image[np.newaxis, :, :]  # Add channel dimension
-            elif len(scaled_image.shape) == 3 and scaled_image.shape[2] == 3:
+            if len(image.shape) == 2:
+                image = image[np.newaxis, :, :]  # Add channel dimension
+            elif len(image.shape) == 3 and image.shape[2] == 3:
                 # Convert HWC → CHW for RGB
-                scaled_image = scaled_image.transpose(2, 0, 1)
+                image = image.transpose(2, 0, 1)
 
-            # Extract tiles from calibrated float32 image
+            # Extract tiles from raw float32 image
             # Use custom tiling for ALL domains to ensure proper overlap and NO padding
             if domain == "photography":
                 file_path_str = metadata.get("file_path", "")
                 if file_path_str.endswith(".ARW"):
                     # Sony files: custom tiling to get exactly 54 tiles (6×9)
-                    tile_infos = self._extract_sony_tiles(scaled_image)
+                    tile_infos = self._extract_sony_tiles(image)
                 elif file_path_str.endswith(".RAF"):
                     # Fuji files: custom tiling to get exactly 24 tiles (4×6)
-                    tile_infos = self._extract_fuji_tiles(scaled_image)
+                    tile_infos = self._extract_fuji_tiles(image)
                 else:
                     # Fallback to Sony custom tiling
-                    tile_infos = self._extract_sony_tiles(scaled_image)
+                    tile_infos = self._extract_sony_tiles(image)
             elif domain == "astronomy":
                 # Custom tiling for astronomy to get exactly 81 tiles (9×9)
-                tile_infos = self._extract_astronomy_tiles(scaled_image)
+                tile_infos = self._extract_astronomy_tiles(image)
             elif domain == "microscopy":
                 # Custom tiling for microscopy to get exactly 16 tiles (4×4)
-                tile_infos = self._extract_microscopy_tiles(scaled_image)
+                tile_infos = self._extract_microscopy_tiles(image)
             else:
                 # Fallback for unknown domains
                 logger.warning(f"Unknown domain: {domain}, using SystematicTiler")
@@ -427,18 +809,16 @@ class SimpleTilesPipeline:
                     min_valid_ratio=0.5,
                 )
                 tiler = SystematicTiler(config)
-                tile_infos = tiler.extract_tiles(scaled_image)
+                tile_infos = tiler.extract_tiles(normalized_image)
 
             if not tile_infos:
                 logger.warning(f"No tiles extracted from {file_path}")
                 return []
 
-            # Tiles extracted
-
-            # === STEP 5: Process tiles and separate prior/posterior, assign splits ===
+            # === STEP 4: Process tiles and separate prior/posterior, assign splits ===
             processed_tiles = []
-            # Note: In the new workflow, calibration happens to the FULL image before tiling,
-            # so all tiles are already calibrated. No separate raw_tiles/calibrated_tiles stages.
+            # Note: In the new workflow, domain-specific normalization happens to the FULL image before tiling,
+            # so all tiles are already normalized. No separate raw_tiles/normalized_tiles stages.
             max_tiles = len(tile_infos)  # Process ALL tiles - no limit
 
             # Determine data type (prior=clean vs posterior=noisy)
@@ -447,8 +827,6 @@ class SimpleTilesPipeline:
             # Get scene ID and assign train/test/val split
             scene_id = self._get_scene_id(file_path, domain)
             split = self._assign_split(scene_id, data_type)
-
-            # File classified and split assigned
 
             for i in range(max_tiles):
                 tile_info = tile_infos[i]
@@ -465,16 +843,15 @@ class SimpleTilesPipeline:
                     if len(tile_float.shape) == 2:
                         tile_float = tile_float[np.newaxis, :, :]
 
-                    # For photography, apply basic demosaicing (no white balance correction)
+                    # For photography, apply demosaicing from RGGB to RGB
                     if domain == "photography" and tile_float.shape[0] == 4:
-                        # Apply basic demosaicing without white balance correction
+                        # Apply demosaicing to convert RGGB to RGB
                         rgb_tile = self.demosaic_rggb_to_rgb(tile_float)
                         tile_to_save = rgb_tile
-                        # Demosaicing applied
                     else:
                         tile_to_save = tile_float
 
-                    # Save as .npy with unique tile_id
+                    # Save as .pt with unique tile_id
                     # For photography: include camera type to avoid Sony/Fuji collisions
                     # For microscopy: include parent directory structure to avoid file collisions
                     base_stem = Path(file_path).stem
@@ -510,18 +887,16 @@ class SimpleTilesPipeline:
                         # Default for other domains
                         tile_id = f"{domain}_{base_stem}_tile_{i:04d}"
 
-                    tile_metadata = self.save_tile_as_npy(
+                    tile_metadata = self.save_tile_as_pt(
                         tile_to_save,
                         tile_id,
                         domain,
                         data_type,
-                        gain,
-                        read_noise,
-                        calibration_method,
+                        domain_range,
                     )
 
                     if tile_metadata:
-                        # Add comprehensive metadata for .npy tile storage
+                        # Add comprehensive metadata for .pt tile storage
                         tile_metadata.update(
                             {
                                 "tile_size": self.tile_size,
@@ -541,25 +916,23 @@ class SimpleTilesPipeline:
                                 "systematic_coverage": True,
                                 "original_min": float(orig_min),
                                 "original_max": float(orig_max),
-                                "electron_min": float(electron_min),
-                                "electron_max": float(electron_max),
-                                "electron_mean": float(electron_mean),
-                                "electron_std": float(electron_std),
-                                "norm_min": float(np.min(tile_to_save))
+                                "original_mean": float(orig_mean),
+                                "original_std": float(orig_std),
+                                "normalized_min": float(np.min(tile_to_save))
                                 if np.isfinite(np.min(tile_to_save))
-                                else 0.0,
-                                "norm_max": float(np.max(tile_to_save))
+                                else -1.0,
+                                "normalized_max": float(np.max(tile_to_save))
                                 if np.isfinite(np.max(tile_to_save))
                                 else 1.0,
-                                "norm_mean": float(np.mean(tile_to_save))
+                                "normalized_mean": float(np.mean(tile_to_save))
                                 if np.isfinite(np.mean(tile_to_save))
-                                else 0.5,
-                                "norm_std": float(np.std(tile_to_save))
+                                else 0.0,
+                                "normalized_std": float(np.std(tile_to_save))
                                 if np.isfinite(np.std(tile_to_save))
-                                else 0.1,
+                                else 0.5,
                                 "split": split,
                                 "scene_id": scene_id,
-                                "fixed_scale": float(fixed_scale),
+                                "domain_range": domain_range,
                             }
                         )
                         processed_tiles.append(tile_metadata)
@@ -568,23 +941,44 @@ class SimpleTilesPipeline:
                     logger.error(f"Failed to process tile {i} from {file_path}: {e}")
                     continue
 
-            logger.info(
-                f"Generated {len(processed_tiles)} tiles from {Path(file_path).name}"
-            )
+            # === STEP 5: Process visualization tile if requested ===
+            if create_viz and viz_tile is not None and viz_data is not None:
+                try:
+                    # Apply demosaicing if needed (photography RGGB -> RGB)
+                    if domain == "photography" and viz_tile.shape[0] == 4:
+                        viz_tile_processed = self.demosaic_rggb_to_rgb(viz_tile)
+                    else:
+                        viz_tile_processed = viz_tile
 
-            # Log channel information for verification
-            if processed_tiles:
-                sample_tile = processed_tiles[0]
-                logger.info(
-                    f"   ✅ Domain: {domain}, Channels: {sample_tile['channels']}, "
-                    f"Expected: {'RGB (3 channels)' if domain == 'photography' else 'Grayscale (1 channel)'}"
-                )
+                    # Apply domain normalization [domain_min, domain_max] → [0,1]
+                    domain_min = domain_range["min"]
+                    domain_max = domain_range["max"]
+                    normalized_viz = (viz_tile_processed - domain_min) / (
+                        domain_max - domain_min
+                    )
+                    normalized_viz = np.clip(normalized_viz, 0, 1)
 
-            return processed_tiles
+                    # Convert to tensor [-1,1]
+                    tensor_viz = torch.from_numpy(normalized_viz.astype(np.float32))
+                    tensor_viz = 2 * tensor_viz - 1  # [0,1] → [-1,1]
+
+                    # Store all processing steps for visualization
+                    viz_data["domain_normalized"] = normalized_viz.copy()
+                    viz_data["tensor"] = tensor_viz
+
+                    logger.info(
+                        f"✅ Collected visualization data for {Path(file_path).name}"
+                    )
+
+                except Exception as e:
+                    logger.error(f"Failed to process visualization tile: {e}")
+                    viz_data = None
+
+            return processed_tiles, viz_data
 
         except Exception as e:
             logger.error(f"Failed to process file {file_path}: {e}")
-            return []
+            return [], None
 
     def _select_microscopy_file_pairs(self, all_mrc_files: List[Path]) -> List[str]:
         """
@@ -900,16 +1294,20 @@ class SimpleTilesPipeline:
 
         return reconstructed_metadata
 
-    def run_npy_tiles_pipeline(self, max_files_per_domain: int = None):
-        """Run the complete .npy tiles pipeline with fixed domain-specific scaling"""
+    def run_pt_tiles_pipeline(
+        self, max_files_per_domain: int = None, create_visualizations: bool = False
+    ):
+        """Run the complete .pt tiles pipeline with domain-specific normalization and optional visualizations
 
-        # Starting .npy Tiles Pipeline
+        Args:
+            max_files_per_domain: Maximum files to process per domain (None = all files)
+            create_visualizations: If True, create 4-step visualization for first scene per domain
+        """
 
         # Define ALL files for each domain
         sample_files = {"photography": [], "microscopy": [], "astronomy": []}
 
         # Find ALL photography files and select clean/noisy pairs
-        # Discovering photography files
         sony_files = list(
             Path(
                 "/home/jilab/anna_OS_ML/PKL-DiffusionDenoising/data/raw/SID/Sony"
@@ -924,10 +1322,8 @@ class SimpleTilesPipeline:
         sample_files["photography"] = self._select_photography_file_pairs(
             all_photo_files
         )
-        # Found photography file pairs
 
         # Find ALL microscopy files and select clean/noisy pairs
-        # Discovering microscopy files
         all_microscopy_files = list(
             Path(
                 "/home/jilab/anna_OS_ML/PKL-DiffusionDenoising/data/raw/microscopy"
@@ -936,34 +1332,99 @@ class SimpleTilesPipeline:
         sample_files["microscopy"] = self._select_microscopy_file_pairs(
             all_microscopy_files
         )
-        # Found microscopy file pairs
 
-        # Find ALL astronomy files
-        # Discovering astronomy files
-        astronomy_files = list(
-            Path(
-                "/home/jilab/anna_OS_ML/PKL-DiffusionDenoising/data/raw/astronomy"
-            ).rglob("*.fits")
+        # Find ALL astronomy files and interleave clean/noisy for better pairing
+        astronomy_path = Path(
+            "/home/jilab/anna_OS_ML/PKL-DiffusionDenoising/data/raw/astronomy"
         )
-        sample_files["astronomy"] = [str(f) for f in astronomy_files]
-        # Found astronomy files
+
+        # Separate clean (detection) and noisy (g800l) files
+        clean_astronomy = sorted(astronomy_path.rglob("*detection*.fits"))
+        noisy_astronomy = sorted(astronomy_path.rglob("*g800l*.fits"))
+
+        # Interleave clean and noisy files so pairs are processed together
+        astronomy_files = []
+        for clean_file, noisy_file in zip(clean_astronomy, noisy_astronomy):
+            astronomy_files.append(str(clean_file))
+            astronomy_files.append(str(noisy_file))
+
+        # Add any remaining files if lists are unequal length
+        if len(clean_astronomy) > len(noisy_astronomy):
+            astronomy_files.extend(
+                [str(f) for f in clean_astronomy[len(noisy_astronomy) :]]
+            )
+        elif len(noisy_astronomy) > len(clean_astronomy):
+            astronomy_files.extend(
+                [str(f) for f in noisy_astronomy[len(clean_astronomy) :]]
+            )
+
+        sample_files["astronomy"] = astronomy_files
 
         all_tiles_metadata = []
         results = {"domains": {}, "total_tiles": 0}
 
-        for domain_name, file_list in sample_files.items():
-            # Processing domain
+        # Track visualization data per scene
+        viz_data_by_scene = (
+            {} if create_visualizations else None
+        )  # {domain: {scene_id: {"noisy": data, "clean": data}}}
+        viz_output_dir = (
+            self.base_path / "processed" / "visualizations"
+            if create_visualizations
+            else None
+        )
 
+        for domain_name, file_list in sample_files.items():
             domain_tiles = []
             processed_files = 0
 
+            # Initialize viz tracking for this domain
+            if create_visualizations:
+                viz_data_by_scene[domain_name] = {}
+
             for file_path in file_list[: max_files_per_domain or len(file_list)]:
                 if not Path(file_path).exists():
-                    # File not found
                     continue
 
                 try:
-                    tiles = self.process_file_to_npy_tiles(file_path, domain_name)
+                    # Determine data type and scene
+                    data_type = self._determine_data_type(file_path, domain_name)
+                    scene_id = self._get_scene_id(file_path, domain_name)
+
+                    # Check if we should collect visualization data
+                    # Collect for first scene per domain, and for both noisy and clean
+                    should_create_viz = False
+                    if create_visualizations:
+                        if scene_id not in viz_data_by_scene[domain_name]:
+                            # First time seeing this scene - initialize and collect
+                            viz_data_by_scene[domain_name][scene_id] = {}
+                            should_create_viz = True
+                        elif data_type not in viz_data_by_scene[domain_name][scene_id]:
+                            # We have this scene but missing this data type (clean or noisy)
+                            should_create_viz = True
+
+                    # Process file with or without visualization
+                    tiles, viz_data = self.process_file_to_pt_tiles(
+                        file_path, domain_name, create_viz=should_create_viz
+                    )
+
+                    # Store visualization data if collected
+                    if viz_data is not None and should_create_viz:
+                        viz_data_by_scene[domain_name][scene_id][data_type] = viz_data
+
+                        # If we have both noisy and clean for this scene, create visualization immediately
+                        scene_data = viz_data_by_scene[domain_name][scene_id]
+                        if "noisy" in scene_data and "clean" in scene_data:
+                            viz_output = {
+                                "domain": domain_name,
+                                "scene_id": scene_id,
+                                "noisy": scene_data["noisy"],
+                                "clean": scene_data["clean"],
+                            }
+                            self.create_scene_visualization(viz_output, viz_output_dir)
+                            logger.info(
+                                f"📊 Created visualization for {domain_name} scene: {scene_id}"
+                            )
+
                     domain_tiles.extend(tiles)
                     processed_files += 1
 
@@ -988,9 +1449,6 @@ class SimpleTilesPipeline:
                                 indent=2,
                                 default=str,
                             )
-                        logger.info(
-                            f"💾 Incremental save: {domain_name} - {processed_files} files, {len(domain_tiles)} tiles"
-                        )
                     except Exception as e:
                         logger.warning(f"⚠️ Failed to save incremental metadata: {e}")
 
@@ -1004,13 +1462,6 @@ class SimpleTilesPipeline:
                 "tiles_generated": len(domain_tiles),
             }
             results["total_tiles"] += len(domain_tiles)
-
-            # Log final domain completion
-            logger.info(
-                f"✅ Domain {domain_name} completed: {processed_files} files, {len(domain_tiles)} tiles"
-            )
-
-            # Generated tiles from files
 
         # Save comprehensive metadata (includes all calibration, spatial, and processing info)
         metadata_path = (
@@ -1027,8 +1478,9 @@ class SimpleTilesPipeline:
                 "processing_timestamp": datetime.now().isoformat(),
                 "tile_size": self.tile_size,
                 "overlap_ratios": self.overlap_ratios,
-                "fixed_scales": self.fixed_scales,
-                "storage_format": "npy_float32",
+                "domain_ranges": self.domain_ranges,
+                "storage_format": "pt_float32",
+                "normalization": "[domain_min, domain_max] → [0,1] → [-1,1]",
             },
             "tiles": all_tiles_metadata,
         }
@@ -1053,10 +1505,6 @@ class SimpleTilesPipeline:
             except Exception as e2:
                 logger.error(f"❌ Failed to save backup metadata: {e2}")
 
-        logger.info(
-            f".npy Tiles Pipeline Completed: {results['total_tiles']:,} tiles generated"
-        )
-
         return results
 
     def load_microscopy_mrc(self, file_path: str) -> Tuple[np.ndarray, Dict[str, Any]]:
@@ -1065,7 +1513,6 @@ class SimpleTilesPipeline:
             raise ImportError("BioSR MRC reader not available")
 
         try:
-            # Loading MRC file
             header, data = read_mrc(file_path)
 
             # Convert to standard format
@@ -1094,23 +1541,6 @@ class SimpleTilesPipeline:
         except Exception as e:
             logger.error(f"❌ Error reading MRC file {file_path}: {e}")
             raise
-
-    def _get_physics_based_calibration(
-        self, domain: str, metadata: Dict[str, Any] = None
-    ) -> Tuple[float, float, str]:
-        """Get domain-specific physics-based calibration parameters"""
-        # Extract ISO and camera type from filename for SID dataset
-        if domain == "photography" and metadata and "file_path" in metadata:
-            file_path = metadata["file_path"]
-            if file_path.endswith(".ARW"):
-                # Sony files are typically ISO 200
-                metadata["iso"] = 200
-                metadata["camera_type"] = "sony"
-            elif file_path.endswith(".RAF"):
-                # Fuji files are typically ISO 1000 (from SID dataset)
-                metadata["iso"] = 1000
-                metadata["camera_type"] = "fuji"
-        return get_physics_based_calibration(domain, metadata)
 
     def _determine_data_type(self, file_path: str, domain: str) -> str:
         """Determine if file contains clean or noisy data"""
@@ -1236,47 +1666,6 @@ class SimpleTilesPipeline:
         else:
             return "test"
 
-    def _apply_physics_calibration(
-        self, image: np.ndarray, gain: float, read_noise: float, domain: str
-    ) -> np.ndarray:
-        """
-        Apply physics-based calibration to convert sensor ADU values to calibrated electrons
-
-        Process:
-        1. Convert ADU (Analog-to-Digital Units) to electrons using gain
-        2. Apply read noise correction
-        3. Clip negative values (physical constraint)
-
-        Args:
-            image: Raw image in ADU units (from sensor)
-            gain: Conversion factor (electrons/ADU)
-            read_noise: Read noise in electrons
-            domain: Domain name for domain-specific processing
-
-        Returns:
-            Calibrated image in electron units
-        """
-        try:
-            # Convert ADU to electrons
-            # Formula: electrons = ADU × gain
-            image_electrons = image.astype(np.float32) * gain
-
-            # Apply read noise correction (subtract noise floor)
-            # For very low signals, we need to account for read noise
-            image_calibrated = image_electrons - read_noise
-
-            # Don't clip negative values - allow them to preserve the full dynamic range
-            # This matches the working approach from visualize_calibration_standalone.py
-            # image_calibrated = np.maximum(image_calibrated, 0.0)
-
-            # Calibration applied
-
-            return image_calibrated
-
-        except Exception as e:
-            logger.error(f"Physics calibration failed: {e}, using original image")
-            return image.astype(np.float32)
-
     def _extract_sony_tiles(self, image: np.ndarray) -> List[Any]:
         """Extract exactly 54 tiles (6×9 grid) from Sony images with proper overlap"""
         try:
@@ -1349,9 +1738,6 @@ class SimpleTilesPipeline:
 
             overlap_h = tile_size - stride_h
             overlap_w = tile_size - stride_w
-            logger.info(
-                f"   ✅ Sony: {len(tiles)} tiles (256×256, overlap: {overlap_h}×{overlap_w}px)"
-            )
             return tiles
 
         except Exception as e:
@@ -1431,9 +1817,6 @@ class SimpleTilesPipeline:
 
             overlap_h = tile_size - stride_h
             overlap_w = tile_size - stride_w
-            logger.info(
-                f"   ✅ Fuji: {len(tiles)} tiles (256×256, overlap: {overlap_h}×{overlap_w}px)"
-            )
             return tiles
 
         except Exception as e:
@@ -1512,9 +1895,6 @@ class SimpleTilesPipeline:
 
             overlap_h = tile_size - stride_h
             overlap_w = tile_size - stride_w
-            logger.info(
-                f"   ✅ Astronomy: {len(tiles)} tiles (256×256, overlap: {overlap_h}×{overlap_w}px)"
-            )
             return tiles
 
         except Exception as e:
@@ -1593,9 +1973,6 @@ class SimpleTilesPipeline:
 
             overlap_h = tile_size - stride_h
             overlap_w = tile_size - stride_w
-            logger.info(
-                f"   ✅ Microscopy: {len(tiles)} tiles (256×256, overlap: {overlap_h}×{overlap_w}px)"
-            )
             return tiles
 
         except Exception as e:
@@ -1670,7 +2047,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Simple .npy Tiles Pipeline with Domain-Specific Fixed Scaling"
+        description="Simple .pt Tiles Pipeline with Domain-Specific Range Normalization for [-1,1]"
     )
     parser.add_argument(
         "--base_path",
@@ -1684,19 +2061,36 @@ def main():
         default=None,
         help="Maximum files per domain (default: None = all files)",
     )
+    parser.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Generate 4-step visualizations for first scene per domain",
+    )
 
     args = parser.parse_args()
 
-    # Run .npy tiles pipeline
+    # Run .pt tiles pipeline
     pipeline = SimpleTilesPipeline(args.base_path)
-    results = pipeline.run_npy_tiles_pipeline(args.max_files)
+    results = pipeline.run_pt_tiles_pipeline(
+        args.max_files, create_visualizations=args.visualize
+    )
 
     if results.get("total_tiles", 0) > 0:
-        print(f"\n🎊 SUCCESS: .npy Tiles Pipeline Completed!")
-        print(f"📊 Total .npy tiles generated: {results['total_tiles']:,}")
+        print(f"\n🎊 SUCCESS: .pt Tiles Pipeline Completed!")
+        print(f"📊 Total .pt tiles generated: {results['total_tiles']:,}")
         print(f"📐 Tile size: 256×256")
-        print(f"💾 .npy files (float32) saved to: {args.base_path}/processed/npy_tiles/")
-        print(f"🎯 Fixed domain-specific scaling applied (no per-image normalization)")
+        print(f"💾 .pt files (float32) saved to: {args.base_path}/processed/pt_tiles/")
+        print(
+            f"🎯 Domain-specific range normalization applied: [domain_min, domain_max] → [0,1] → [-1,1]"
+        )
+        print(f"   • Photography: [0, 15871] → [-1,1]")
+        print(f"   • Microscopy: [0, 65535] → [-1,1]")
+        print(f"   • Astronomy: [-65, 385] → [-1,1]")
+
+        if args.visualize:
+            print(
+                f"\n📊 Visualizations saved to: {args.base_path}/processed/visualizations/"
+            )
 
         print(f"\n📋 Domain Results:")
         for domain, stats in results.get("domains", {}).items():
@@ -1710,136 +2104,9 @@ def main():
         print(f"Total tiles processed: {results.get('total_tiles', 0)}")
 
 
-def get_physics_based_calibration(
-    domain: str, metadata: Dict[str, Any] = None
-) -> Tuple[float, float, str]:
-    """Get domain-specific physics-based calibration parameters"""
-
-    if domain == "photography":
-        # Check camera type from metadata if available
-        camera_type = metadata.get("camera_type", "sony") if metadata else "sony"
-
-        if camera_type == "sony":
-            # Sony A7S II parameters (corrected values)
-            iso = metadata.get("iso", 200) if metadata else 200
-            if iso is not None and iso >= 4000:
-                gain = 0.79  # e-/ADU at ISO 4000 (unity gain)
-                read_noise = 2.5  # electrons above ISO 4000
-            elif iso >= 200:
-                gain = 5.0  # e-/ADU at ISO 200 (1/0.198 DN/e⁻ = ~5 e-/DN)
-                read_noise = 3.56  # electrons RMS at ISO 200
-            else:
-                gain = 2.1  # e-/ADU fallback
-                read_noise = 6.0  # electrons fallback
-            method = "photon_transfer_curve"
-
-        elif camera_type == "fuji":
-            # Fuji X-Trans parameters (corrected values for X-T3/X-T4)
-            iso = metadata.get("iso", 1000) if metadata else 1000
-            if iso >= 1000:
-                gain = 1.8  # e-/ADU at ISO 1000 (1/0.55 DN/e⁻ = ~1.8 e-/DN)
-                read_noise = (
-                    3.75  # electrons RMS at ISO 1000 (average of 3.5-4.0 range)
-                )
-            elif iso >= 200:
-                gain = 1.8  # e-/ADU at ISO 200 (same as 1000 for Fuji)
-                read_noise = 3.75  # electrons RMS at ISO 200
-            else:
-                gain = 0.75  # e-/ADU fallback
-                read_noise = 2.5  # electrons fallback
-            method = "photon_transfer_curve"
-
-        else:
-            # Default fallback
-            gain = 1.0
-            read_noise = 3.0
-            method = "default"
-
-    elif domain == "microscopy":
-        # BioSR sCMOS parameters (measured values)
-        noise_level = metadata.get("noise_level", 5) if metadata else 5
-
-        # Scale gain and read noise based on noise level (1-9 scale)
-        # Higher noise level = lower gain, higher read noise
-        gain = 1.0 + (noise_level - 5) * 0.1  # Range: 0.6-1.4
-        read_noise = 1.5 + (noise_level - 5) * 0.2  # Range: 0.5-2.5
-
-        method = "noise_level_analysis"
-
-    elif domain == "astronomy":
-        # HST instrument parameters (measured values)
-        if metadata:
-            instrument_name = metadata.get("instrument", "ACS")
-            detector_name = metadata.get("detector", "WFC")
-            # Construct proper instrument key (e.g., "ACS_WFC", "WFC3_UVIS")
-            instrument = f"{instrument_name}_{detector_name}"
-        else:
-            instrument = "ACS_WFC"
-
-        # Instrument-specific calibration parameters
-        instrument_params = {
-            "ACS_WFC": {
-                "gain": 1.0,
-                "read_noise": 3.5,
-                "method": "fits_header_analysis",
-            },
-            "WFC3_UVIS": {
-                "gain": 1.5,
-                "read_noise": 3.09,
-                "method": "fits_header_analysis",
-            },
-            "WFC3_IR": {
-                "gain": 2.5,
-                "read_noise": 15.0,
-                "method": "fits_header_analysis",
-            },
-            "WFPC2_WF": {
-                "gain": 7.0,
-                "read_noise": 6.5,
-                "method": "fits_header_analysis",
-            },
-            "WFPC2_PC": {
-                "gain": 7.0,
-                "read_noise": 6.5,
-                "method": "fits_header_analysis",
-            },
-        }
-
-        if instrument in instrument_params:
-            params = instrument_params[instrument]
-            gain = params["gain"]
-            read_noise = params["read_noise"]
-            method = params["method"]
-        else:
-            # Default for unknown instruments
-            gain = 1.0
-            read_noise = 3.0
-            method = "default"
-
-    else:
-        # Fallback for unknown domains
-        gain = 1.0
-        read_noise = 1.0
-        method = "default"
-
-    return gain, read_noise, method
-
-
-def get_calibration_description(
-    domain: str, gain: float, read_noise: float, method: str
-) -> str:
-    """Get human-readable description of calibration parameters"""
-    if domain == "photography":
-        return f"Camera sensor calibration (Gain: {gain:.2f} e-/ADU, Read noise: {read_noise:.1f} e-)"
-    elif domain == "microscopy":
-        return f"sCMOS detector calibration (Gain: {gain:.2f} e-/ADU, Read noise: {read_noise:.1f} e-)"
-    elif domain == "astronomy":
-        return f"HST instrument calibration (Gain: {gain:.1f} e-/ADU, Read noise: {read_noise:.1f} e-)"
-    else:
-        return f"Generic calibration (Gain: {gain:.2f} e-/ADU, Read noise: {read_noise:.1f} e-)"
-
-
 if __name__ == "__main__":
-    # Start the .npy tiles pipeline with fixed domain-specific scaling
-    logger.info("🚀 Starting .npy tiles pipeline with fixed domain-specific scaling...")
+    # Start the .pt tiles pipeline with domain-specific range normalization for [-1,1]
+    logger.info(
+        "🚀 Starting .pt tiles pipeline with domain-specific range normalization: [domain_min, domain_max] → [0,1] → [-1,1]..."
+    )
     main()
