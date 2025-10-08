@@ -33,18 +33,17 @@ A unified framework for low-light image restoration across photography, microsco
 
 ## Key Features
 
-- **Physics-Aware**: Exact Poisson-Gaussian noise modeling with domain-specific calibration
+- **Physics-Aware**: Exact Poisson-Gaussian noise modeling with domain-specific normalization
 - **Cross-Domain**: Unified model architecture for photography, microscopy, and astronomy
 - **Full Precision**: Float32 .pt pipeline preserves all sensor information (NO quantization)
-- **Fixed Scaling**: Domain-specific physics-based normalization for stable training
-- **Metadata-Rich**: Complete calibration parameters and physics information preserved
+- **Fixed Scaling**: Domain-specific range normalization for stable training
+- **Metadata-Rich**: Complete tile statistics and normalization parameters preserved
 
 ## Data Processing Overview
 
 Our preprocessing pipeline (detailed in `preprocessing/DATA_PROCESSING.md`) converts raw sensor data from three imaging domains into unified 256×256 float32 tiles with domain-specific normalization. The pipeline implements:
 
-- **Domain-specific range normalization**: [domain_min, domain_max] → [0,1] → [-1,1]
-- **Physics-based calibration**: ADU → electrons conversion with sensor-specific gains
+- **Domain-specific range normalization**: [domain_min, domain_max] → [0,1] → [-1,1] (directly on raw ADU values)
 - **Scene-based splitting**: 70/15/15 train/val/test with no data leakage
 - **Systematic tiling**: Grid-based extraction with controlled overlap
 - **Perfect pairing**: 1:1 clean-noisy correspondence for supervised training
@@ -66,17 +65,20 @@ Our preprocessing pipeline (detailed in `preprocessing/DATA_PROCESSING.md`) conv
 
 ```
 Preprocessing (process_tiles_pipeline.py):
-Raw Sensor (ADU) → Physics Calibration (ADU→electrons) → Fixed Scaling ([0,~1]) → 256×256 tiles (.pt)
-                         ↓                                        ↓                            ↓
-                  Domain-specific gain/noise          Photography: ÷80000           Float32 precision
-                                                     Microscopy: ÷66000            NO quantization
-                                                     Astronomy: (+5.0)÷170         Metadata preserved
+Raw Sensor (ADU) → Domain Normalization → 256×256 tiles (.pt)
+                         ↓                            ↓
+           [domain_min, domain_max]       Float32 precision
+                    → [0,1] → [-1,1]      NO quantization
+           Photography: [0, 15871]        Metadata preserved
+           Microscopy: [0, 65535]
+           Astronomy: [-65, 385]
 
 Training Pipeline (train_pt_edm_native.py):
-Load .pt ([0,~1]) → Normalize to [-1,1] → EDM Diffusion → Physics Guidance → Train
-         ↓                    ↓                    ↓                  ↓              ↓
-  Float32 tensor      x * 2 - 1           Native EDM loss    Poisson-Gaussian   Full precision
-  CHW format          For EDM             + conditioning       noise model       No data loss
+Load .pt ([-1,1]) → EDM Diffusion → Physics Guidance → Train
+         ↓                  ↓                  ↓              ↓
+  Float32 tensor   Native EDM loss    Poisson-Gaussian   Full precision
+  CHW format       + conditioning       noise model       No data loss
+  Already normalized                                     Directly ready for EDM
 
 Inference Pipeline:
 Noisy Input → Load & Normalize → EDM Sampling → Inverse Scaling → Denoised Output
@@ -90,12 +92,11 @@ Noisy Input → Load & Normalize → EDM Sampling → Inverse Scaling → Denois
 ### Float32 .pt Training Pipeline (NVIDIA EDM)
 - **No Quantization**: Full float32 precision from sensor to training (no uint8 conversion)
 - **Direct Loading**: `torch.load()` → EDM model (following NVIDIA EDM patterns)
-- **Fixed Domain Scaling**: Physics-based normalization prevents per-image variation
-  - Photography (Sony): gain 5.0 e⁻/ADU, scale by 80000
-  - Photography (Fuji): gain 1.8 e⁻/ADU, scale by 80000
-  - Microscopy: gain 1.0 e⁻/ADU, scale by 66000
-  - Astronomy: gain 1.0 e⁻/ADU, offset +5.0, scale by 170
-- **Metadata Preservation**: All calibration parameters (gain, read_noise, electron statistics) stored per tile
+- **Fixed Domain Normalization**: Domain-specific range normalization prevents per-image variation
+  - Photography: [0, 15871] → [0,1] → [-1,1]
+  - Microscopy: [0, 65535] → [0,1] → [-1,1]
+  - Astronomy: [-65, 385] → [0,1] → [-1,1]
+- **Metadata Preservation**: All tile statistics and normalization parameters stored per tile
 
 ### Multi-Domain Preprocessing Pipeline
 - **Systematic Tiling**: Domain-specific grid patterns with controlled overlap
@@ -246,40 +247,38 @@ python -c "import json; [print(json.dumps(json.loads(line), indent=2)) for line 
   - Photography: 3 channels (RGB)
   - Microscopy: 1 channel (grayscale)
   - Astronomy: 1 channel (grayscale)
-- **Value Range**: [0, ~1] after fixed domain-specific scaling
-- **Metadata**: JSON with calibration parameters, splits, and physics info
+- **Value Range**: [-1, 1] after domain-specific normalization
+- **Metadata**: JSON with normalization parameters, splits, and tile statistics
 
-### Physics Calibration
+### Domain Normalization
 ```python
-# Step 1: Convert ADU to electrons
-electrons = ADU * gain - read_noise
+# Apply domain-specific range normalization to raw ADU values
+# [domain_min, domain_max] → [0,1] → [-1,1]
 
-# Step 2: Apply domain-specific fixed scaling
-# Photography
-scaled = electrons / 80000.0
+# Photography: [0, 15871] → [0,1] → [-1,1]
+normalized = (ADU - 0.0) / (15871.0 - 0.0)
+normalized = np.clip(normalized, 0, 1)
+normalized = 2 * normalized - 1
 
-# Microscopy
-scaled = electrons / 66000.0
+# Microscopy: [0, 65535] → [0,1] → [-1,1]
+normalized = (ADU - 0.0) / (65535.0 - 0.0)
+normalized = np.clip(normalized, 0, 1)
+normalized = 2 * normalized - 1
 
-# Astronomy (with offset for negative values)
-scaled = (electrons + 5.0) / 170.0
-```
-
-### Training Normalization
-```python
-# Pipeline output: [0, ~1] range
-# EDM expects: [-1, 1] range
-normalized = images * 2.0 - 1.0
+# Astronomy: [-65, 385] → [0,1] → [-1,1]
+normalized = (ADU - (-65.0)) / (385.0 - (-65.0))
+normalized = np.clip(normalized, 0, 1)
+normalized = 2 * normalized - 1
 ```
 
 ### Domain-Specific Parameters
 
-| Domain | Sensor Type | Gain (e⁻/ADU) | Read Noise (e⁻) | Fixed Scale | Tile Grid |
-|--------|-------------|---------------|-----------------|-------------|-----------|
-| Photography (Sony) | CCD/CMOS | 5.0 | 3.56 | 80000 | 6×9 (54) |
-| Photography (Fuji) | X-Trans | 1.8 | 3.75 | 80000 | 4×6 (24) |
-| Microscopy | sCMOS | 1.0 | 1.5 | 66000 | 4×4 (16) |
-| Astronomy (HST) | CCD | 1.0 | 3.5 | 170 | 9×9 (81) |
+| Domain | Sensor Type | Normalization Range | Tile Grid |
+|--------|-------------|---------------------|-----------|
+| Photography (Sony) | CCD/CMOS | [0, 15871] | 6×9 (54) |
+| Photography (Fuji) | X-Trans | [0, 15871] | 4×6 (24) |
+| Microscopy | sCMOS | [0, 65535] | 4×4 (16) |
+| Astronomy (HST) | CCD | [-65, 385] | 9×9 (81) |
 
 ## Citation
 
