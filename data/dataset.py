@@ -371,7 +371,13 @@ class EDMPTDataset:
         return clean_files, noisy_mapping
 
     def _create_split(self) -> List[Path]:
-        """Apply max_files limit to image files (splits already defined in metadata)."""
+        """Use only the files designated for the current split in metadata JSON.
+
+        The files in self.image_files are already filtered by _load_tile_metadata()
+        to include only files from the current split (train/validation/test) as
+        specified in the metadata JSON file.
+        """
+        # The split files are already filtered by _load_tile_metadata() based on JSON splits
         split_files = self.image_files.copy()
 
         # Apply max_files limit if specified
@@ -379,6 +385,9 @@ class EDMPTDataset:
             split_files = split_files[: self.max_files]
             logger.info(f"Limited to {self.max_files} files for {self.split} split")
 
+        logger.info(
+            f"Using {len(split_files)} files for '{self.split}' split as designated in metadata JSON"
+        )
         return split_files
 
     def _get_raw_labels(self):
@@ -588,13 +597,24 @@ class EDMPTDataset:
                 else:  # HWC format
                     expected_shape = (self.image_size, self.image_size, self.channels)
 
+                # For multi-domain datasets, allow both grayscale (1 channel) and RGB (3 channels)
                 if tensor.shape != expected_shape and tensor.shape[:2] != (
                     self.image_size,
                     self.image_size,
                 ):
-                    logger.warning(
-                        f"Image shape {tensor.shape} doesn't match expected size {self.image_size}"
-                    )
+                    # Check if this is a grayscale image in a multi-domain context
+                    if (
+                        hasattr(self, "domains")
+                        and tensor.shape[0] == 1
+                        and self.channels == 3
+                    ):
+                        logger.debug(
+                            f"Grayscale image {tensor.shape} will be converted to RGB"
+                        )
+                    else:
+                        logger.warning(
+                            f"Image shape {tensor.shape} doesn't match expected size {self.image_size}"
+                        )
             else:
                 raise ValueError(f"Unexpected number of dimensions: {tensor.ndim}")
 
@@ -794,5 +814,483 @@ def create_edm_pt_datasets(
     logger.info(f"  Resolution: {train_dataset.resolution}x{train_dataset.resolution}")
     logger.info(f"  Channels: {train_dataset.num_channels}")
     logger.info(f"  Label dim: {train_dataset.label_dim}")
+
+    return train_dataset, val_dataset
+
+
+class MultiDomainEDMPTDataset(EDMPTDataset):
+    """
+    Multi-domain EDM-compatible dataset for cross-domain generalization training.
+
+    This dataset loads data from multiple domains (photography, microscopy, astronomy)
+    by combining individual domain datasets and provides domain labels for conditional training.
+    It loads each domain's data using their respective metadata files.
+
+    Key features:
+    - Loads data from all domains simultaneously using separate metadata files
+    - Provides domain labels for conditional training
+    - Combines individual domain datasets into a unified dataset
+    - Maintains float32 precision throughout
+    - Compatible with EDM's training interface
+    """
+
+    def __init__(
+        self,
+        data_root: Union[str, Path],
+        metadata_json: Union[
+            str, Path
+        ],  # Can be a list of metadata files or single comprehensive file
+        split: str = "train",
+        max_files: Optional[int] = None,
+        seed: int = 42,
+        image_size: int = 256,
+        channels: int = 3,
+        domains: Optional[List[str]] = None,  # List of domains to include
+        use_labels: bool = True,
+        label_dim: int = 3,  # One-hot domain encoding for 3 domains
+        data_range: str = "normalized",
+        **kwargs,
+    ):
+        """
+        Initialize multi-domain EDM-compatible PT dataset.
+
+        Args:
+            data_root: Root directory containing .pt files
+            metadata_json: Metadata JSON file(s) - can be single comprehensive file or list of domain-specific files
+            split: Data split (train, validation, test)
+            max_files: Maximum number of files to load
+            seed: Random seed for reproducibility
+            image_size: Target image size (will validate shape matches)
+            channels: Number of channels (1 for grayscale, 3 for RGB)
+            domains: List of domains to include ['photography', 'microscopy', 'astronomy']
+            use_labels: Enable conditioning labels (for domain encoding)
+            label_dim: Dimension of label space (3 for one-hot domain encoding)
+            data_range: Expected data range - 'normalized' [0,1], 'electrons', or 'custom'
+            **kwargs: Additional arguments (ignored for compatibility)
+        """
+        # Set up multi-domain configuration
+        if domains is None:
+            domains = ["photography", "microscopy", "astronomy"]
+
+        self.domains = domains
+        self.data_range = data_range
+
+        # Domain encoding mapping (same as single-domain)
+        self.domain_to_label = {
+            "photography": [1, 0, 0],
+            "microscopy": [0, 1, 0],
+            "astronomy": [0, 0, 1],
+        }
+
+        # Validate domains
+        for domain in domains:
+            if domain not in self.domain_to_label:
+                raise ValueError(
+                    f"Unsupported domain: {domain}. Supported: {list(self.domain_to_label.keys())}"
+                )
+
+        # Initialize dataset parameters
+        self.data_root = Path(data_root)
+        self.split = split
+        self.max_files = max_files
+        self.seed = seed
+        self.image_size = image_size
+        self.channels = channels
+
+        # Set up labels for domain encoding (needed before loading domain datasets)
+        self._use_labels = use_labels
+        self._label_dim = label_dim
+
+        # Set domain to None for multi-domain dataset (will be determined per sample)
+        self.domain = None
+
+        if not self.data_root.exists():
+            raise FileNotFoundError(f"Data directory not found: {self.data_root}")
+
+        # Handle metadata - can be single file or list of domain-specific files
+        self.metadata_json = metadata_json
+        self.domain_datasets = self._load_domain_datasets()
+
+        # Combine all domain datasets
+        self.image_files, self.noisy_mapping = self._combine_domain_files()
+        self.calibration_params = getattr(self, "calibration_params", {})
+
+        # Create train/val/test split across all domains
+        self.split_files = self._create_combined_split()
+
+        # Set up raw shape for EDM compatibility (N, C, H, W)
+        self._raw_shape = [len(self.split_files), channels, image_size, image_size]
+
+        # Set up remaining label properties
+        self._raw_labels = None
+        self._raw_idx = np.arange(len(self.split_files), dtype=np.int64)
+        self._xflip = np.zeros(len(self.split_files), dtype=np.uint8)
+
+        # Set up dataset properties for EDM compatibility
+        self._name = f"multi_domain_pt_{split}"
+
+        # Cache for loaded images
+        self._cached_images = {}
+
+        logger.info(f"Initialized MultiDomainEDMPTDataset:")
+        logger.info(f"  Domains: {self.domains}")
+        logger.info(f"  Split: {self.split}")
+        logger.info(f"  Files: {len(self.split_files)}")
+        logger.info(f"  Image size: {image_size}x{image_size}")
+        logger.info(f"  Channels: {channels}")
+        logger.info(f"  Label dim: {label_dim}")
+
+    def _load_domain_datasets(self) -> Dict[str, EDMPTDataset]:
+        """Load individual domain datasets."""
+        domain_datasets = {}
+
+        # Default metadata file paths for each domain
+        default_metadata_files = {
+            "photography": "dataset/processed/metadata_photography_incremental.json",
+            "microscopy": "dataset/processed/metadata_microscopy_incremental.json",
+            "astronomy": "dataset/processed/metadata_astronomy_incremental.json",
+        }
+
+        # Domain-specific channel configurations
+        domain_channels = {
+            "photography": 3,  # RGB
+            "microscopy": 1,  # Grayscale
+            "astronomy": 1,  # Grayscale
+        }
+
+        # Determine metadata files to use
+        if isinstance(self.metadata_json, (list, tuple)):
+            # List of metadata files provided
+            metadata_files = self.metadata_json
+            if len(metadata_files) != len(self.domains):
+                raise ValueError(
+                    f"Number of metadata files ({len(metadata_files)}) must match "
+                    f"number of domains ({len(self.domains)})"
+                )
+            metadata_dict = dict(zip(self.domains, metadata_files))
+        else:
+            # Single metadata file - try to determine if it's comprehensive or use defaults
+            metadata_path = Path(self.metadata_json)
+            if metadata_path.exists():
+                try:
+                    with open(metadata_path, "r") as f:
+                        metadata = json.load(f)
+
+                    # Check if it's a comprehensive metadata file
+                    if "domains_processed" in metadata:
+                        logger.info("Using comprehensive metadata file")
+                        # For comprehensive file, we'll handle it differently
+                        return self._load_comprehensive_dataset(metadata_path)
+                    else:
+                        # Single domain file, use defaults for other domains
+                        logger.info(
+                            "Using single domain metadata file, will use defaults for other domains"
+                        )
+                        detected_domain = metadata.get("domain", "photography")
+                        metadata_dict = default_metadata_files.copy()
+                        metadata_dict[detected_domain] = str(metadata_path)
+                except Exception as e:
+                    logger.warning(
+                        f"Could not parse metadata file {metadata_path}: {e}"
+                    )
+                    metadata_dict = default_metadata_files.copy()
+            else:
+                # File doesn't exist, use defaults
+                logger.info(
+                    f"Metadata file {metadata_path} not found, using default domain metadata files"
+                )
+                metadata_dict = default_metadata_files.copy()
+
+        # Load each domain dataset
+        for domain in self.domains:
+            metadata_file = metadata_dict.get(domain)
+            if not metadata_file:
+                logger.warning(
+                    f"No metadata file specified for domain {domain}, skipping"
+                )
+                continue
+
+            metadata_path = Path(metadata_file)
+            if not metadata_path.exists():
+                logger.warning(
+                    f"Metadata file for {domain} not found: {metadata_path}, skipping"
+                )
+                continue
+
+            try:
+                # Get domain-specific channel count
+                domain_channel_count = domain_channels.get(domain, self.channels)
+
+                # Create individual domain dataset
+                domain_dataset = EDMPTDataset(
+                    data_root=self.data_root,
+                    metadata_json=metadata_path,
+                    split=self.split,
+                    max_files=self.max_files // len(self.domains)
+                    if self.max_files
+                    else None,
+                    seed=self.seed,
+                    image_size=self.image_size,
+                    channels=domain_channel_count,  # Use domain-specific channel count
+                    domain=domain,
+                    use_labels=True,
+                    label_dim=self._label_dim,
+                    data_range=self.data_range,
+                )
+                domain_datasets[domain] = domain_dataset
+                logger.info(
+                    f"Loaded {domain} dataset: {len(domain_dataset)} samples ({domain_channel_count} channels)"
+                )
+
+            except Exception as e:
+                logger.error(f"Failed to load {domain} dataset: {e}")
+                continue
+
+        if not domain_datasets:
+            raise ValueError("No domain datasets could be loaded")
+
+        logger.info(f"Successfully loaded {len(domain_datasets)} domain datasets")
+        return domain_datasets
+
+    def _load_comprehensive_dataset(
+        self, metadata_path: Path
+    ) -> Dict[str, EDMPTDataset]:
+        """Load dataset from comprehensive metadata file."""
+        try:
+            with open(metadata_path, "r") as f:
+                metadata = json.load(f)
+
+            # Check if this is a comprehensive metadata file
+            if "domains_processed" not in metadata:
+                raise ValueError(
+                    f"Metadata file {metadata_path} is not a comprehensive multi-domain file. "
+                    "Expected 'domains_processed' field."
+                )
+
+            # Validate that all requested domains are present
+            processed_domains = metadata.get("domains_processed", [])
+            missing_domains = set(self.domains) - set(processed_domains)
+            if missing_domains:
+                raise ValueError(
+                    f"Missing domains in metadata: {missing_domains}. "
+                    f"Available domains: {processed_domains}"
+                )
+
+            # Create a single dataset from comprehensive metadata
+            comprehensive_dataset = EDMPTDataset(
+                data_root=self.data_root,
+                metadata_json=metadata_path,
+                split=self.split,
+                max_files=self.max_files,
+                seed=self.seed,
+                image_size=self.image_size,
+                channels=self.channels,
+                domain=None,  # Will be auto-detected
+                use_labels=True,
+                label_dim=self._label_dim,
+                data_range=self.data_range,
+            )
+
+            # Return as a single "comprehensive" domain
+            return {"comprehensive": comprehensive_dataset}
+
+        except Exception as e:
+            logger.error(f"Failed to load comprehensive metadata: {e}")
+            raise
+
+    def _combine_domain_files(self) -> Tuple[List[Path], Dict[Path, Path]]:
+        """Combine files from all domain datasets."""
+        all_image_files = []
+        all_noisy_mapping = {}
+
+        for domain, dataset in self.domain_datasets.items():
+            # Get files from this domain dataset
+            domain_files = dataset.image_files
+            domain_noisy_mapping = dataset.noisy_mapping
+
+            # Add domain information to the file paths for later identification
+            for img_file in domain_files:
+                all_image_files.append(img_file)
+                all_noisy_mapping[img_file] = domain_noisy_mapping.get(
+                    img_file, img_file
+                )
+
+            logger.info(f"Added {len(domain_files)} files from {domain} domain")
+
+        # Remove duplicates
+        all_image_files = list(set(all_image_files))
+
+        logger.info(f"Total files combined from all domains: {len(all_image_files)}")
+        return all_image_files, all_noisy_mapping
+
+    def _create_combined_split(self) -> List[Path]:
+        """Create combined train/val/test split from all domain datasets."""
+        all_split_files = []
+
+        for domain, dataset in self.domain_datasets.items():
+            # Get split files from this domain dataset
+            domain_split_files = dataset.split_files
+            all_split_files.extend(domain_split_files)
+            logger.info(
+                f"Added {len(domain_split_files)} {self.split} files from {domain} domain"
+            )
+
+        # Apply max_files limit if specified
+        if self.max_files and len(all_split_files) > self.max_files:
+            np.random.seed(self.seed)
+            all_split_files = np.random.choice(
+                all_split_files, self.max_files, replace=False
+            ).tolist()
+
+        logger.info(
+            f"Created combined {self.split} split with {len(all_split_files)} files"
+        )
+        return all_split_files
+
+    def _get_domain_from_file(self, file_path: Path) -> str:
+        """Extract domain from file path."""
+        # Try to extract domain from path
+        path_parts = file_path.parts
+
+        # Check if domain is in the path
+        for domain in self.domains:
+            if domain in path_parts:
+                return domain
+
+        # Check if domain is in filename
+        filename = file_path.stem.lower()
+        for domain in self.domains:
+            if domain in filename:
+                return domain
+
+        # Default fallback
+        logger.warning(
+            f"Could not determine domain for {file_path}, defaulting to photography"
+        )
+        return "photography"
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Get item with domain label."""
+        # Get the image using the base class method
+        image = self._load_pt_item(idx)["clean"]
+
+        # Get domain label
+        file_path = self.split_files[idx]
+        domain = self._get_domain_from_file(file_path)
+        domain_label = torch.tensor(self.domain_to_label[domain], dtype=torch.float32)
+
+        # Convert grayscale to RGB if needed for multi-domain consistency
+        if image.shape[0] == 1 and self.channels == 3:
+            # Convert grayscale (1 channel) to RGB (3 channels) by repeating
+            image = image.repeat(3, 1, 1)
+            logger.debug(f"Converted grayscale to RGB for domain {domain}")
+        elif image.shape[0] == 3 and self.channels == 1:
+            # Convert RGB (3 channels) to grayscale (1 channel) by averaging
+            image = image.mean(dim=0, keepdim=True)
+            logger.debug(f"Converted RGB to grayscale for domain {domain}")
+
+        return image, domain_label
+
+    @property
+    def resolution(self) -> int:
+        """Get image resolution."""
+        return self.image_size
+
+    @property
+    def num_channels(self) -> int:
+        """Get number of channels."""
+        return self.channels
+
+    @property
+    def label_dim(self) -> int:
+        """Get label dimension."""
+        return self._label_dim
+
+
+def create_multi_domain_edm_pt_datasets(
+    data_root: Union[str, Path],
+    metadata_json: Union[
+        str, Path, List[str]
+    ],  # Can be single file or list of domain-specific files
+    domains: Optional[List[str]] = None,
+    train_split: str = "train",
+    val_split: str = "validation",
+    max_files: Optional[int] = None,
+    seed: int = 42,
+    image_size: int = 256,
+    channels: int = 3,
+    label_dim: int = 3,
+    data_range: str = "normalized",
+) -> Tuple[MultiDomainEDMPTDataset, MultiDomainEDMPTDataset]:
+    """
+    Create multi-domain EDM-compatible training and validation datasets.
+
+    Args:
+        data_root: Root directory containing .pt files
+        metadata_json: Metadata JSON file(s) - can be single comprehensive file or list of domain-specific files
+        domains: List of domains to include ['photography', 'microscopy', 'astronomy']
+        train_split: Training split name
+        val_split: Validation split name
+        max_files: Maximum files per split (None for all)
+        seed: Random seed
+        image_size: Target image size
+        channels: Number of channels (1 for grayscale, 3 for RGB)
+        label_dim: Label dimension for one-hot domain encoding
+        data_range: Expected data range - 'normalized' [0,1], 'electrons', or 'custom'
+
+    Returns:
+        Tuple of (train_dataset, val_dataset) compatible with EDM's native interface
+    """
+    if domains is None:
+        domains = ["photography", "microscopy", "astronomy"]
+
+    logger.info(f"Creating multi-domain EDM-compatible PT datasets")
+    logger.info(f"Domains: {domains}")
+    logger.info(f"Data root: {data_root}")
+    logger.info(f"Image size: {image_size}x{image_size}")
+    logger.info(f"Channels: {channels}")
+    logger.info(f"Label dim: {label_dim}")
+    logger.info(f"Data range: {data_range}")
+
+    # Create training dataset
+    train_dataset = MultiDomainEDMPTDataset(
+        data_root=data_root,
+        metadata_json=metadata_json,
+        split=train_split,
+        max_files=max_files,
+        seed=seed,
+        image_size=image_size,
+        channels=channels,
+        domains=domains,
+        use_labels=True,
+        label_dim=label_dim,
+        data_range=data_range,
+    )
+
+    # Create validation dataset
+    val_max_files = max_files // 5 if max_files else None  # Use 20% for validation
+    val_dataset = MultiDomainEDMPTDataset(
+        data_root=data_root,
+        metadata_json=metadata_json,
+        split=val_split,
+        max_files=val_max_files,
+        seed=seed + 1,
+        image_size=image_size,
+        channels=channels,
+        domains=domains,
+        use_labels=True,
+        label_dim=label_dim,
+        data_range=data_range,
+    )
+
+    logger.info(
+        f"✅ Created multi-domain EDM-compatible PT datasets (float32, no quantization):"
+    )
+    logger.info(f"  Training: {len(train_dataset)} samples")
+    logger.info(f"  Validation: {len(val_dataset)} samples")
+    logger.info(f"  Resolution: {train_dataset.resolution}x{train_dataset.resolution}")
+    logger.info(f"  Channels: {train_dataset.num_channels}")
+    logger.info(f"  Label dim: {train_dataset.label_dim}")
+    logger.info(f"  Domains: {domains}")
 
     return train_dataset, val_dataset

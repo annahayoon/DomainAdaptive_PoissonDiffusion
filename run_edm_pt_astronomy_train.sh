@@ -1,29 +1,27 @@
 #!/bin/bash
 
-# Multi-domain training script for EDM with float32 .pt files (NO QUANTIZATION)
-# This script trains a single model on multiple domains (photography, microscopy, astronomy)
-# for cross-domain generalization using full-precision 32-bit float PyTorch tensors
-# Conservative settings optimized for multi-domain dataset size
+# Training script for EDM with float32 .pt files (NO QUANTIZATION)
+# This script trains on full-precision 32-bit float PyTorch tensors
+# Conservative settings optimized for smaller dataset size
 # Uses more realistic parameters than default EDM settings
 # Includes split-screen GPU monitoring for real-time resource tracking
 #
 # USAGE:
-#   1. Start fresh multi-domain training (auto-generates timestamped directory):
-#      ./run_edm_pt_train.sh
+#   1. Start fresh training (auto-generates timestamped directory):
+#      ./run_edm_npy_train.sh
 #
 #   2. Resume training from existing directory:
-#      OUTPUT_DIR="results/edm_multi_domain_training_20251007_081108" ./run_edm_pt_train.sh
+#      OUTPUT_DIR="results/edm_pt_training_20251007_081108" ./run_edm_npy_train.sh
 #      OR just run the script again - it auto-detects and resumes if checkpoints exist
 #
 #   3. Override output directory:
-#      OUTPUT_DIR="results/my_custom_multi_domain_training" ./run_edm_pt_train.sh
+#      OUTPUT_DIR="results/my_custom_training" ./run_edm_npy_train.sh
 #
 # The script automatically:
-# - Creates timestamped directories for fresh multi-domain training
+# - Creates timestamped directories for fresh training
 # - Detects and resumes from existing checkpoints
 # - Restores optimizer state for smooth continuation
 # - Monitors GPU usage in real-time
-# - Trains on all domains simultaneously for cross-domain generalization
 
 set -e
 
@@ -110,7 +108,7 @@ monitor_training() {
             echo -e "\033[2J\033[H"  # Clear screen and move cursor to top
 
             echo "╔════════════════════════════════════════════════════════════════╗"
-            echo "║        📊 GPU MONITORING DASHBOARD (Multi-Domain PT Float32) ║"
+            echo "║            📊 GPU MONITORING DASHBOARD (PT Float32)           ║"
             echo "║════════════════════════════════════════════════════════════════║"
             printf "║  Iteration: %-8s  Time: %-15s                     ║\n" "$iteration" "$(date +'%H:%M:%S')"
             echo "║════════════════════════════════════════════════════════════════║"
@@ -153,8 +151,8 @@ monitor_training() {
             echo "╚════════════════════════════════════════════════════════════════╝"
 
             # Check if training is still running
-            if ! pgrep -f "train_pt_edm_native.py" > /dev/null; then
-                echo "🎉 MULTI-DOMAIN TRAINING COMPLETED - MONITORING STOPPED"
+            if ! pgrep -f "train_pt_edm_native_astronomy.py" > /dev/null; then
+                echo "🎉 TRAINING COMPLETED - MONITORING STOPPED"
                 break
             fi
         else
@@ -165,12 +163,9 @@ monitor_training() {
     done
 }
 
-# Configuration for multi-domain training
-DATA_ROOT="${DATA_ROOT:-dataset/processed/pt_tiles}"
-# Note: Multi-domain training uses all three domain metadata files automatically
-# Photography: dataset/processed/metadata_photography_incremental.json
-# Microscopy: dataset/processed/metadata_microscopy_incremental.json
-# Astronomy: dataset/processed/metadata_astronomy_incremental.json
+# Configuration
+DATA_ROOT="${DATA_ROOT:-dataset/processed/pt_tiles/astronomy/clean}"
+METADATA_JSON="${METADATA_JSON:-dataset/processed/metadata_astronomy_incremental.json}"
 
 # Output directory configuration
 # To resume training: Set OUTPUT_DIR to existing directory path
@@ -181,28 +176,28 @@ OUTPUT_DIR="${OUTPUT_DIR:-}"  # Can be set via environment variable or left empt
 if [ -z "$OUTPUT_DIR" ]; then
     # Generate timestamp-based directory name
     TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-    OUTPUT_DIR="results/edm_multi_domain_training_${TIMESTAMP}"
-    echo "📁 Creating new multi-domain training directory: $OUTPUT_DIR"
+    OUTPUT_DIR="results/edm_pt_training_astronomy_${TIMESTAMP}"
+    echo "📁 Creating new training directory: $OUTPUT_DIR"
 elif [ ! -d "$OUTPUT_DIR" ]; then
     echo "📁 Directory does not exist, will create: $OUTPUT_DIR"
 else
     echo "📁 Directory exists, will attempt to resume: $OUTPUT_DIR"
 fi
 
-# Training hyperparameters (optimized settings for multi-domain efficiency and stability)
-# Batch size optimized for memory efficiency with multi-domain data
+# Training hyperparameters (optimized settings for efficiency and stability)
+# Batch size optimized for memory efficiency - maximum safe value
 BATCH_SIZE=4            # Total batch size (optimal balance of efficiency and memory)
 BATCH_GPU=4             # Batch size per GPU (same as total for single GPU)
-TOTAL_KIMG=500          # 500 kimg (~40 epochs) - longer training for multi-domain generalization
-EMA_HALFLIFE_KIMG=100   # EMA half-life (longer for multi-domain stability)
-LR_RAMPUP_KIMG=20       # Learning rate warmup (increased for multi-domain stability)
-KIMG_PER_TICK=25        # Progress print interval (~2 epochs)
-SNAPSHOT_TICKS=4        # Save every 4 ticks (~8 epochs) - balanced validation frequency
-EARLY_STOPPING_PATIENCE=8   # Stop if no improvement for 8 validation checks (~16 epochs)
+TOTAL_KIMG=300          # 300 kimg (~25 epochs) - conservative to avoid overfitting
+EMA_HALFLIFE_KIMG=50    # EMA half-life
+LR_RAMPUP_KIMG=10       # Learning rate warmup (increased for stability)
+KIMG_PER_TICK=12        # Progress print interval (~1 epoch)
+SNAPSHOT_TICKS=2        # Save every 2 ticks (~2 epochs) - more frequent validation
+EARLY_STOPPING_PATIENCE=5   # Stop if no improvement for 5 validation checks (~10 epochs)
 
 # Model architecture (ADM defaults from EDM)
 IMG_RESOLUTION=256
-CHANNELS=3              # RGB for multi-domain training (grayscale domains converted to RGB)
+CHANNELS=1              # 1 for grayscale, 3 for RGB
 MODEL_CHANNELS=192      # ADM default
 CHANNEL_MULT="1 2 3 4"  # ADM default
 LR=0.0001               # Learning rate
@@ -212,30 +207,24 @@ DEVICE="cuda"
 SEED=42
 
 echo "=================================================="
-echo "EDM Multi-Domain Training with Float32 .pt Files"
-echo "CROSS-DOMAIN GENERALIZATION - NO QUANTIZATION"
-echo "Conservative training for multi-domain stability"
+echo "EDM Training with Float32 .pt Files - ASTRONOMY"
+echo "NO QUANTIZATION - FULL PRECISION"
+echo "Conservative training to prevent overfitting"
 echo "=================================================="
 echo "Data root: $DATA_ROOT"
-echo "Metadata files:"
-echo "  Photography: dataset/processed/metadata_photography_incremental.json"
-echo "  Microscopy: dataset/processed/metadata_microscopy_incremental.json"
-echo "  Astronomy: dataset/processed/metadata_astronomy_incremental.json"
+echo "Metadata: $METADATA_JSON"
 echo "Output: $OUTPUT_DIR"
-echo "Domains: photography (RGB), microscopy (grayscale->RGB), astronomy (grayscale->RGB)"
 echo "Batch size: $BATCH_SIZE (optimal for efficiency and memory)"
-echo "Total training: $TOTAL_KIMG kimg (~40 epochs)"
+echo "Total training: $TOTAL_KIMG kimg (~25 epochs)"
 echo "Architecture: ADM (DhariwalUNet)"
 echo "Model channels: $MODEL_CHANNELS"
 echo "Early stopping: Enabled (patience=$EARLY_STOPPING_PATIENCE)"
-echo "Multi-domain strategy: Single model learns from all domains"
+echo "Overfitting prevention: Conservative 25 epochs + early stopping"
 echo "=================================================="
 echo "📊 SPLIT-SCREEN GPU MONITORING: ENABLED"
 echo "   Real-time GPU memory, CPU usage, and training status"
 echo "   Monitoring updates every 1 minute"
 echo "   Note: Float32 tensors preserve full precision"
-echo "   Cross-domain generalization: One model for all domains"
-echo "   Channel conversion: Grayscale domains converted to RGB for consistency"
 echo "=================================================="
 
 # Check if required tools are available
@@ -304,7 +293,7 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 # Run training (Python script auto-detects and resumes from latest checkpoint)
-python3 train_pt_edm_native.py \
+python3 train_pt_edm_native_astronomy.py \
     --data_root "$DATA_ROOT" \
     --metadata_json "$METADATA_JSON" \
     --output_dir "$OUTPUT_DIR" \
@@ -331,8 +320,7 @@ kill $MONITOR_PID 2>/dev/null
 echo "✅ Monitoring stopped"
 
 echo "=================================================="
-echo "Multi-Domain Training completed!"
-echo "Cross-domain generalization model ready!"
+echo "Training completed!"
 echo "Checkpoints saved in: $OUTPUT_DIR"
 echo "Best model: $OUTPUT_DIR/best_model.pkl"
 echo "=================================================="
