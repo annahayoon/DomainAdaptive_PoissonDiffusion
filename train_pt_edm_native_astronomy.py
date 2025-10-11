@@ -1,28 +1,23 @@
 #!/usr/bin/env python3
 """
-Train cross-domain restoration model using EDM's native training code with FLOAT32 .pt files.
+Train restoration model using EDM's native training code with FLOAT32 .pt files.
 
-This script trains a single model on multiple domains (photography, microscopy, astronomy)
-for cross-domain generalization using EDM's native utilities with 32-bit float .pt files (NO QUANTIZATION):
+This script uses EDM's native utilities with 32-bit float .pt files (NO QUANTIZATION):
 - Uses torch_utils.distributed for distributed training
 - Uses torch_utils.training_stats for metrics tracking
 - Uses torch_utils.misc for model utilities (EMA, checkpointing, etc.)
 - Uses dnnlib.util for general utilities
 - Follows EDM's training_loop.py structure
-- Provides domain labels for conditional training
 
-Key Features:
-- Multi-domain training: photography, microscopy, astronomy
-- Cross-domain generalization: single model learns from all domains
-- Domain conditioning: one-hot domain labels for conditional generation
-- Channel consistency: grayscale domains (microscopy, astronomy) converted to RGB
+Key Differences from PNG training:
+- Loads 32-bit float .pt files instead of 8-bit PNG
 - NO quantization loss - preserves full precision
-- Data is in [-1, 1] normalized range from pipeline's domain-specific scaling:
-  * Photography: ADU / 16000.0 -> normalize to [-1, 1] (RGB)
-  * Microscopy: ADU / 65535.0 -> normalize to [-1, 1] (grayscale -> RGB)
-  * Astronomy: (ADU + 5.0) / 110.0 -> normalize to [-1, 1] (grayscale -> RGB)
+- Data is in [0, ~1] normalized range from pipeline's fixed scaling:
+  * Photography: ADU * gain / 80000.0
+  * Microscopy: ADU * gain / 66000.0
+  * Astronomy: (ADU * gain + 5.0) / 170.0
 - Float32 throughout the pipeline
-- Uses individual domain metadata files for each domain
+- Training normalizes to [-1, 1] for EDM
 """
 
 import argparse
@@ -49,7 +44,7 @@ sys.path.insert(0, str(edm_path))
 import external.edm.dnnlib
 
 # Import our PT dataset
-from data.dataset import create_edm_pt_datasets, create_multi_domain_edm_pt_datasets
+from data.dataset import create_edm_pt_datasets
 from external.edm.torch_utils import distributed as dist
 from external.edm.torch_utils import misc, training_stats
 from external.edm.training.loss import EDMLoss
@@ -447,28 +442,24 @@ def validate(ema_model, val_dataset, loss_fn, device):
 
 
 def main():
-    """Main training function for multi-domain float32 .pt data.
+    """Main training function for float32 .pt data.
 
-    The training script expects comprehensive .pt files that have been processed by the pipeline with:
-    - Domain-specific physics calibration (ADU → electrons) for all domains
+    The training script expects .pt files that have been processed by the pipeline with:
+    - Domain-specific physics calibration (ADU → electrons)
     - Domain-specific scaling to [0, ~1] range:
       * Photography: electrons / 16000.0
       * Microscopy: electrons / 65535.0
       * Astronomy: (electrons + 5.0) / 110.0
     - Final normalization to [-1, 1] using transforms.Normalize(mean=[0.5], std=[0.5])
-    - Comprehensive metadata JSON with multi-domain splits, calibration parameters, and scaling info
+    - Metadata JSON with splits, calibration parameters, and scaling info
 
     The training loop will:
-    1. Load float32 .pt data from all domains (photography, microscopy, astronomy)
-    2. Use ONLY the training split as designated in each domain's metadata JSON
-    3. Convert grayscale domains (microscopy, astronomy) to RGB for consistency
-    4. Provide domain labels for conditional training (one-hot encoding)
-    5. Use data directly for EDM training (no additional normalization)
-    6. Train a single diffusion model on all domains for cross-domain generalization
-    7. Maintain full precision throughout (no quantization)
+    1. Load float32 .pt data already in [-1, 1] range
+    2. Use data directly for EDM training (no additional normalization)
+    3. Train the diffusion model with full precision (no quantization)
     """
     parser = argparse.ArgumentParser(
-        description="Train cross-domain model with EDM native training using multi-domain float32 .pt files (NO QUANTIZATION)"
+        description="Train model with EDM native training using float32 .pt files (NO QUANTIZATION)"
     )
 
     # Data arguments
@@ -476,13 +467,13 @@ def main():
         "--data_root",
         type=str,
         required=True,
-        help="Path to data directory containing multi-domain .pt tiles",
+        help="Path to data directory containing .pt tiles",
     )
     parser.add_argument(
         "--metadata_json",
         type=str,
         required=True,
-        help="Path to comprehensive metadata JSON file with multi-domain splits and calibration info",
+        help="Path to metadata JSON file with splits and calibration info",
     )
 
     # Training arguments
@@ -538,7 +529,7 @@ def main():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="results/edm_multi_domain_training",
+        default="results/edm_npy_training",
         help="Output directory",
     )
     parser.add_argument(
@@ -564,8 +555,8 @@ def main():
     if dist.get_rank() == 0:
         os.makedirs(run_dir, exist_ok=True)
         dist.print0("=" * 60)
-        dist.print0("EDM MULTI-DOMAIN TRAINING WITH FLOAT32 .PT FILES")
-        dist.print0("CROSS-DOMAIN GENERALIZATION - NO QUANTIZATION")
+        dist.print0("EDM NATIVE TRAINING WITH FLOAT32 .PT FILES")
+        dist.print0("NO QUANTIZATION - FULL PRECISION")
         dist.print0("=" * 60)
 
     # Setup logging
@@ -575,33 +566,27 @@ def main():
             file_name=log_file, file_mode="a", should_flush=True
         )
 
-    # Create multi-domain datasets for cross-domain generalization
-    dist.print0("Loading multi-domain float32 .pt datasets...")
-
-    # Use all three domain metadata files
-    domain_metadata_files = [
-        "dataset/processed/metadata_photography_incremental.json",  # Photography
-        "dataset/processed/metadata_microscopy_incremental.json",  # Microscopy
-        "dataset/processed/metadata_astronomy_incremental.json",  # Astronomy
-    ]
-
-    train_dataset, val_dataset = create_multi_domain_edm_pt_datasets(
+    # Create datasets
+    dist.print0("Loading float32 .pt datasets...")
+    dataset_kwargs = dict(
+        class_name="data.dataset.EDMPTDataset",
         data_root=args.data_root,
-        metadata_json=domain_metadata_files,  # All three domain metadata files
-        domains=[
-            "photography",
-            "microscopy",
-            "astronomy",
-        ],  # All domains for cross-domain training
-        train_split="train",
-        val_split="validation",
-        max_files=None,
-        seed=args.seed,
+        metadata_json=args.metadata_json,
+        split="train",
         image_size=args.img_resolution,
-        channels=3,  # Use RGB for multi-domain training (grayscale domains will be converted)
-        label_dim=3,  # One-hot domain encoding
+        channels=args.channels,
+        domain="astronomy",  # Specify domain explicitly for comprehensive metadata files
+        use_labels=True,
+        label_dim=3,
         data_range="normalized",  # Pipeline outputs [-1, 1] normalized data
+        max_size=None,
     )
+
+    # Create datasets
+    train_dataset = external.edm.dnnlib.util.construct_class_by_name(**dataset_kwargs)
+    val_dataset_kwargs = dataset_kwargs.copy()
+    val_dataset_kwargs["split"] = "validation"
+    val_dataset = external.edm.dnnlib.util.construct_class_by_name(**val_dataset_kwargs)
 
     # Configure network
     network_kwargs = external.edm.dnnlib.EasyDict(
@@ -687,8 +672,7 @@ def main():
     )
 
     dist.print0("=" * 60)
-    dist.print0("MULTI-DOMAIN TRAINING COMPLETED SUCCESSFULLY")
-    dist.print0("CROSS-DOMAIN GENERALIZATION MODEL READY")
+    dist.print0("TRAINING COMPLETED SUCCESSFULLY")
     dist.print0("=" * 60)
 
 
