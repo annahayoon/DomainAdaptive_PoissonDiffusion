@@ -1,9 +1,0 @@
-{
-  "gain": 1.0,
-  "black_level": 512,
-  "white_level": 16383,
-  "read_noise": 5.0,
-  "pixel_size": 4.29,
-  "pixel_unit": "um",
-  "domain": "photography"
-}

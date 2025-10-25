@@ -544,3 +544,254 @@ class ReversibleTransform:
         logger.debug(f"Reconstruction error: {error}")
 
         return error
+
+
+class AdaptiveResolutionManager:
+    """
+    Manages adaptive resolution selection for optimal quality-efficiency tradeoff.
+
+    This class analyzes input images and selects the optimal resolution for processing
+    based on image characteristics, computational constraints, and quality requirements.
+    """
+
+    def __init__(
+        self,
+        min_resolution: int = 32,
+        max_resolution: int = 128,
+        quality_estimator_model: str = "simple",
+    ):
+        """
+        Initialize adaptive resolution manager.
+
+        Args:
+            min_resolution: Minimum processing resolution
+            max_resolution: Maximum processing resolution
+            quality_estimator_model: Model for quality estimation ('simple', 'cnn')
+        """
+        self.min_resolution = min_resolution
+        self.max_resolution = max_resolution
+        self.quality_estimator_model = quality_estimator_model
+
+        # Quality estimation parameters
+        self.noise_sensitivity = 0.3  # How much noise affects resolution choice
+        self.detail_sensitivity = 0.4  # How much detail affects resolution choice
+        self.size_sensitivity = 0.3  # How much input size affects resolution choice
+
+        logger.info(
+            f"AdaptiveResolutionManager initialized: {min_resolution} → {max_resolution}"
+        )
+
+    def analyze_image_characteristics(self, image: torch.Tensor) -> Dict[str, float]:
+        """
+        Analyze image characteristics for resolution selection.
+
+        Args:
+            image: Input image tensor [B, C, H, W]
+
+        Returns:
+            Dictionary with characteristic scores
+        """
+        # Estimate noise level (simple variance-based method)
+        noise_level = self._estimate_noise_level(image)
+
+        # Estimate detail level (edge density)
+        detail_level = self._estimate_detail_level(image)
+
+        # Get input size factor
+        input_size = max(image.shape[-2:])
+
+        return {
+            "noise_level": noise_level,
+            "detail_level": detail_level,
+            "input_size": input_size,
+            "noise_score": min(1.0, noise_level * 2.0),  # Normalize to [0,1]
+            "detail_score": detail_level,
+            "size_score": min(1.0, input_size / self.max_resolution),
+        }
+
+    def _estimate_noise_level(self, image: torch.Tensor) -> float:
+        """Estimate noise level in image."""
+        # Simple noise estimation based on high-frequency variance
+        if image.dim() == 4:
+            # Use mean across batch and channels for simplicity
+            img = image.mean(dim=(0, 1), keepdim=True)
+        else:
+            img = image.unsqueeze(0)
+
+        # Compute local variance as noise proxy
+        kernel_size = 3
+        padding = kernel_size // 2
+
+        # Mean filter
+        mean_filt = torch.nn.functional.avg_pool2d(
+            img, kernel_size, stride=1, padding=padding
+        )
+
+        # Variance filter
+        var_filt = (
+            torch.nn.functional.avg_pool2d(
+                img**2, kernel_size, stride=1, padding=padding
+            )
+            - mean_filt**2
+        )
+
+        noise_estimate = var_filt.mean().item()
+        return min(1.0, noise_estimate * 10.0)  # Scale and clamp
+
+    def _estimate_detail_level(self, image: torch.Tensor) -> float:
+        """Estimate detail level in image."""
+        # Simple edge detection based approach
+        if image.dim() == 4:
+            img = image.mean(dim=1, keepdim=True)  # Convert to grayscale
+        else:
+            img = image.unsqueeze(1)
+
+        # Sobel-like edge detection (simple gradient)
+        sobel_x = torch.tensor(
+            [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+            dtype=torch.float32,
+            device=image.device,
+        )
+        sobel_y = torch.tensor(
+            [[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+            dtype=torch.float32,
+            device=image.device,
+        )
+
+        sobel_x = sobel_x.view(1, 1, 3, 3)
+        sobel_y = sobel_y.view(1, 1, 3, 3)
+
+        edges_x = torch.nn.functional.conv2d(img, sobel_x, padding=1)
+        edges_y = torch.nn.functional.conv2d(img, sobel_y, padding=1)
+        edges = torch.sqrt(edges_x**2 + edges_y**2)
+
+        # Detail score is average edge magnitude
+        detail_score = edges.mean().item()
+        return min(1.0, detail_score * 2.0)  # Scale and clamp
+
+    def select_optimal_resolution(
+        self, image: torch.Tensor, constraints: Dict[str, Union[float, str]] = None
+    ) -> Tuple[int, Dict[str, float]]:
+        """
+        Select optimal resolution for processing.
+
+        Args:
+            image: Input image tensor
+            constraints: Processing constraints
+
+        Returns:
+            (optimal_resolution, analysis_results)
+        """
+        if constraints is None:
+            constraints = {}
+
+        # Default constraints
+        max_memory_gb = constraints.get("max_memory_gb", 8.0)
+        target_time_sec = constraints.get("target_time_sec", 30.0)
+        quality_preference = constraints.get("quality_preference", "balanced")
+
+        # Analyze image characteristics
+        characteristics = self.analyze_image_characteristics(image)
+
+        # Calculate resolution score based on characteristics
+        resolution_score = (
+            self.noise_sensitivity * characteristics["noise_score"]
+            + self.detail_sensitivity * characteristics["detail_score"]
+            + self.size_sensitivity * characteristics["size_score"]
+        )
+
+        # Adjust based on quality preference
+        if quality_preference == "quality":
+            resolution_score = min(1.0, resolution_score * 1.2)
+        elif quality_preference == "speed":
+            resolution_score = max(0.0, resolution_score * 0.8)
+
+        # Map score to resolution
+        # Higher score → higher resolution needed
+        if resolution_score < 0.2:
+            target_resolution = self.min_resolution
+        elif resolution_score < 0.4:
+            target_resolution = self.min_resolution * 2
+        elif resolution_score < 0.6:
+            target_resolution = self.min_resolution * 4
+        elif resolution_score < 0.8:
+            target_resolution = self.min_resolution * 8
+        else:
+            target_resolution = self.max_resolution
+
+        # Apply memory constraint
+        # Rough memory estimation: memory_gb ≈ (resolution/512)^2 * 8
+        estimated_memory = (
+            target_resolution / self.max_resolution
+        ) ** 2 * max_memory_gb
+        if estimated_memory > max_memory_gb:
+            # Scale down resolution to fit memory
+            scale_factor = (max_memory_gb / estimated_memory) ** 0.5
+            target_resolution = max(
+                self.min_resolution, int(target_resolution * scale_factor)
+            )
+
+        # Ensure resolution is power of 2
+        target_resolution = self._closest_power_of_two(target_resolution)
+
+        # Clamp to valid range
+        target_resolution = max(
+            self.min_resolution, min(self.max_resolution, target_resolution)
+        )
+
+        return target_resolution, characteristics
+
+    def _closest_power_of_two(self, n: int) -> int:
+        """Find closest power of 2 to n."""
+        if n <= 0:
+            return self.min_resolution
+
+        # Find closest lower power of 2
+        lower = 1 << (n.bit_length() - 1)
+
+        # Check if n is closer to lower or upper
+        upper = lower << 1
+
+        if n - lower < upper - n:
+            return max(self.min_resolution, lower)
+        else:
+            return min(self.max_resolution, upper)
+
+    def get_batch_size_for_resolution(
+        self, resolution: int, base_batch_size: int = 4
+    ) -> int:
+        """
+        Calculate optimal batch size for given resolution.
+
+        Args:
+            resolution: Target resolution
+            base_batch_size: Base batch size for max resolution
+
+        Returns:
+            Optimal batch size for the resolution
+        """
+        # Memory scales with resolution squared
+        memory_scale = (resolution / self.max_resolution) ** 2
+
+        # Adjust batch size inversely with memory scale
+        if memory_scale <= 1.0:
+            return int(base_batch_size / memory_scale)
+        else:
+            return max(1, int(base_batch_size / memory_scale))
+
+    def estimate_processing_time(
+        self, resolution: int, base_time: float = 10.0  # Base time for max resolution
+    ) -> float:
+        """
+        Estimate processing time for given resolution.
+
+        Args:
+            resolution: Processing resolution
+            base_time: Base processing time for max resolution
+
+        Returns:
+            Estimated processing time in seconds
+        """
+        # Time scales roughly with resolution squared
+        time_scale = (resolution / self.max_resolution) ** 2
+        return base_time * time_scale

@@ -7,7 +7,7 @@ ensuring consistency and enabling easy testing and extension.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -311,7 +311,7 @@ class Evaluator(ABC):
         pass
 
     @abstractmethod
-    def get_metric_names(self) -> list[str]:
+    def get_metric_names(self) -> List[str]:
         """Get list of available metric names."""
         pass
 

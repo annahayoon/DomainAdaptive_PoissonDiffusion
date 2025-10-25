@@ -2,10 +2,12 @@
 Comprehensive evaluation metrics for Poisson-Gaussian diffusion restoration.
 
 This module implements:
-1. Standard image quality metrics (PSNR, SSIM, LPIPS, MS-SSIM)
-2. Physics-specific metrics (χ² consistency, residual whiteness, bias analysis)
-3. Domain-specific metrics (counting accuracy, photometry error)
-4. Baseline comparison utilities
+1. Physics-specific metrics (χ² consistency, residual whiteness, bias analysis)
+2. Domain-specific metrics (counting accuracy, photometry error)
+3. Baseline comparison utilities
+
+Note: Standard image quality metrics (PSNR, SSIM, LPIPS, NIQE) are now computed
+directly in the sampling script using torchmetrics and piq libraries.
 
 Requirements addressed: 6.3-6.6 from requirements.md
 """
@@ -22,11 +24,378 @@ import torch.nn as nn
 import torch.nn.functional as F
 from scipy import stats
 from scipy.signal import periodogram
-from skimage.metrics import peak_signal_noise_ratio as psnr_skimage
-from skimage.metrics import structural_similarity as ssim_skimage
+# skimage metrics imports removed - now using torchmetrics and piq in sampling script
+
+from .exceptions import AnalysisError
 
 # Set up logging
 logger = logging.getLogger(__name__)
+
+
+class ResidualAnalyzer:
+    """Comprehensive residual analyzer for physics validation.
+
+    This class provides rigorous statistical validation of residuals to verify
+    that they follow expected Poisson-Gaussian statistics (N(0,1) when normalized).
+    """
+
+    def __init__(self, device: str = "cpu"):
+        """Initialize residual analyzer."""
+        self.device = device
+
+    def analyze_residuals(
+        self,
+        pred: torch.Tensor,
+        noisy: torch.Tensor,
+        scale: float,
+        background: float = 0.0,
+        read_noise: float = 0.0,
+        mask: Optional[torch.Tensor] = None,
+    ) -> Dict[str, Any]:
+        """
+        Comprehensive residual analysis for physics validation.
+
+        Args:
+            pred: Predicted clean image [B, C, H, W] (normalized [0,1])
+            noisy: Noisy observation [B, C, H, W] (electrons)
+            scale: Normalization scale (electrons)
+            background: Background offset (electrons)
+            read_noise: Read noise standard deviation (electrons)
+            mask: Valid pixel mask [B, C, H, W]
+
+        Returns:
+            Dictionary containing comprehensive residual statistics
+        """
+        # Convert prediction to electrons
+        pred_electrons = pred * scale + background
+
+        # Compute expected variance under Poisson-Gaussian model
+        expected_variance = torch.clamp(pred_electrons + read_noise**2, min=1e-10)
+
+        # Compute normalized residuals: (noisy - pred) / sqrt(pred + σ_r²)
+        residuals = noisy - pred_electrons
+        normalized_residuals = residuals / torch.sqrt(expected_variance)
+
+        # Apply mask if provided
+        if mask is not None:
+            normalized_residuals = normalized_residuals * mask
+            valid_pixels = mask.sum()
+            if valid_pixels == 0:
+                raise AnalysisError("No valid pixels for residual analysis")
+
+        # Flatten residuals for analysis
+        residuals_flat = normalized_residuals.flatten()
+        if mask is not None:
+            mask_flat = mask.flatten()
+            residuals_flat = residuals_flat[mask_flat > 0.5]
+
+        if len(residuals_flat) < 100:
+            raise AnalysisError(
+                f"Insufficient valid pixels for analysis: {len(residuals_flat)}"
+            )
+
+        # Convert to numpy for statistical tests
+        residuals_np = residuals_flat.detach().cpu().numpy()
+
+        # Perform comprehensive statistical analysis
+        results = self._perform_statistical_tests(
+            residuals_np, pred_electrons, expected_variance, mask
+        )
+
+        # Add basic statistics
+        results.update(
+            {
+                "mean": residuals_np.mean(),
+                "std_dev": residuals_np.std(),
+                "skewness": stats.skew(residuals_np),
+                "kurtosis": stats.kurtosis(residuals_np),
+                "n_samples": len(residuals_np),
+                "scale": scale,
+                "background": background,
+                "read_noise": read_noise,
+            }
+        )
+
+        return results
+
+    def _perform_statistical_tests(
+        self,
+        residuals_np: np.ndarray,
+        pred_electrons: torch.Tensor,
+        expected_variance: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> Dict[str, Any]:
+        """
+        Perform comprehensive statistical tests on normalized residuals.
+
+        Args:
+            residuals_np: Normalized residuals as numpy array
+            pred_electrons: Predicted electron counts
+            expected_variance: Expected variance under Poisson-Gaussian model
+            mask: Valid pixel mask
+
+        Returns:
+            Dictionary of statistical test results
+        """
+        results = {}
+
+        # 1. Kolmogorov-Smirnov test against N(0,1)
+        ks_stat, ks_pvalue = stats.kstest(residuals_np, "norm")
+        results.update(
+            {
+                "ks_statistic": ks_stat,
+                "ks_pvalue": ks_pvalue,
+                "gaussian_fit": ks_pvalue > 0.05,  # Accept normality at 5% level
+            }
+        )
+
+        # 2. Spatial correlation analysis
+        spatial_corr = self._compute_spatial_correlation(
+            residuals_np, pred_electrons.shape
+        )
+        results.update(spatial_corr)
+
+        # 3. Frequency domain analysis (power spectrum)
+        spectral_analysis = self._compute_spectral_analysis(
+            residuals_np, pred_electrons.shape
+        )
+        results.update(spectral_analysis)
+
+        # 4. Additional statistical tests
+        # Shapiro-Wilk test (more sensitive than KS for normality)
+        try:
+            shapiro_stat, shapiro_pvalue = stats.shapiro(
+                residuals_np[:5000]
+            )  # Limit for computation
+            results.update(
+                {
+                    "shapiro_statistic": shapiro_stat,
+                    "shapiro_pvalue": shapiro_pvalue,
+                    "normal_by_shapiro": shapiro_pvalue > 0.05,
+                }
+            )
+        except Exception:
+            results.update(
+                {
+                    "shapiro_statistic": float("nan"),
+                    "shapiro_pvalue": float("nan"),
+                    "normal_by_shapiro": False,
+                }
+            )
+
+        # 5. Anderson-Darling test (even more sensitive)
+        try:
+            ad_result = stats.anderson(residuals_np[:5000], dist="norm")
+            results.update(
+                {
+                    "anderson_statistic": ad_result.statistic,
+                    "anderson_critical_5": ad_result.critical_values[2],  # 5% level
+                    "anderson_significance_5": ad_result.significance_level[2],
+                    "normal_by_anderson": ad_result.statistic
+                    < ad_result.critical_values[2],
+                }
+            )
+        except Exception:
+            results.update(
+                {
+                    "anderson_statistic": float("nan"),
+                    "anderson_critical_5": float("nan"),
+                    "anderson_significance_5": float("nan"),
+                    "normal_by_anderson": False,
+                }
+            )
+
+        # 6. Ljung-Box test for autocorrelation
+        try:
+            lb_stat, lb_pvalue = stats.acorr_ljungbox(residuals_np, lags=[1, 5, 10])
+            results.update(
+                {
+                    "ljung_box_statistic": lb_stat.iloc[-1],  # Last lag
+                    "ljung_box_pvalue": lb_pvalue.iloc[-1],
+                    "white_noise_by_ljung_box": lb_pvalue.iloc[-1] > 0.05,
+                }
+            )
+        except Exception:
+            results.update(
+                {
+                    "ljung_box_statistic": float("nan"),
+                    "ljung_box_pvalue": float("nan"),
+                    "white_noise_by_ljung_box": False,
+                }
+            )
+
+        return results
+
+    def _compute_spatial_correlation(
+        self, residuals_np: np.ndarray, image_shape: torch.Size
+    ) -> Dict[str, Any]:
+        """
+        Compute spatial correlation of residuals.
+
+        Args:
+            residuals_np: Residuals as flattened numpy array
+            image_shape: Shape of the original image tensor
+
+        Returns:
+            Dictionary of spatial correlation metrics
+        """
+        try:
+            # Reshape to 2D for spatial analysis
+            h, w = image_shape[-2], image_shape[-1]
+            if len(residuals_np) < h * w:
+                # Pad if necessary (though this shouldn't happen with proper masking)
+                residuals_2d = np.zeros((h, w))
+                residuals_2d.flat[: len(residuals_np)] = residuals_np
+            else:
+                residuals_2d = residuals_np[: h * w].reshape(h, w)
+
+            # Compute autocorrelation at lag 1 in both directions
+            autocorr_x = np.corrcoef(
+                residuals_2d[:, :-1].flatten(), residuals_2d[:, 1:].flatten()
+            )[0, 1]
+            autocorr_y = np.corrcoef(
+                residuals_2d[:-1, :].flatten(), residuals_2d[1:, :].flatten()
+            )[0, 1]
+
+            # Compute autocorrelation matrix for first few lags
+            max_lag = min(5, min(h, w) // 2)
+            autocorr_matrix = np.zeros((max_lag, max_lag))
+
+            for i in range(max_lag):
+                for j in range(max_lag):
+                    if i == 0 and j == 0:
+                        autocorr_matrix[i, j] = 1.0
+                    else:
+                        shifted = np.roll(residuals_2d, (i, j), axis=(0, 1))
+                        mask = np.ones_like(residuals_2d)
+                        mask = np.roll(mask, (i, j), axis=(0, 1))
+
+                        # Only correlate where both pixels are valid
+                        valid_mask = mask == 1
+                        if valid_mask.sum() > 100:
+                            autocorr_matrix[i, j] = np.corrcoef(
+                                residuals_2d[valid_mask].flatten(),
+                                shifted[valid_mask].flatten(),
+                            )[0, 1]
+                        else:
+                            autocorr_matrix[i, j] = float("nan")
+
+            return {
+                "autocorrelation_lag1_x": autocorr_x,
+                "autocorrelation_lag1_y": autocorr_y,
+                "spatial_uncorrelated": abs(autocorr_x) < 0.1 and abs(autocorr_y) < 0.1,
+                "autocorrelation_matrix": autocorr_matrix,
+            }
+        except Exception as e:
+            logger.warning(f"Spatial correlation analysis failed: {e}")
+            return {
+                "autocorrelation_lag1_x": float("nan"),
+                "autocorrelation_lag1_y": float("nan"),
+                "spatial_uncorrelated": False,
+                "autocorrelation_matrix": None,
+            }
+
+    def _compute_spectral_analysis(
+        self, residuals_np: np.ndarray, image_shape: torch.Size
+    ) -> Dict[str, Any]:
+        """
+        Compute spectral analysis of residuals.
+
+        Args:
+            residuals_np: Residuals as flattened numpy array
+            image_shape: Shape of the original image tensor
+
+        Returns:
+            Dictionary of spectral analysis metrics
+        """
+        try:
+            # Reshape to 2D for spectral analysis
+            h, w = image_shape[-2], image_shape[-1]
+            if len(residuals_np) < h * w:
+                residuals_2d = np.zeros((h, w))
+                residuals_2d.flat[: len(residuals_np)] = residuals_np
+            else:
+                residuals_2d = residuals_np[: h * w].reshape(h, w)
+
+            # Compute 2D power spectral density
+            # Use periodogram for each row and average
+            row_psds = []
+            for row in residuals_2d:
+                if np.std(row) > 1e-10:  # Skip rows with no variation
+                    freqs, psd = periodogram(
+                        row, fs=1.0
+                    )  # fs=1 since we're working in pixels
+                    row_psds.append(psd)
+
+            if not row_psds:
+                return {
+                    "spectral_flatness": float("nan"),
+                    "spectral_slope": float("nan"),
+                    "high_freq_power": float("nan"),
+                    "white_spectrum": False,
+                }
+
+            # Average PSD across rows
+            avg_psd = np.mean(row_psds, axis=0)
+
+            # Skip DC component for analysis
+            freqs = freqs[1:]
+            avg_psd = avg_psd[1:]
+
+            if len(avg_psd) < 10:
+                return {
+                    "spectral_flatness": float("nan"),
+                    "spectral_slope": float("nan"),
+                    "high_freq_power": float("nan"),
+                    "white_spectrum": False,
+                }
+
+            # Compute spectral flatness (Wiener entropy)
+            # White noise should have flat spectrum (value close to 1)
+            spectral_flatness = np.exp(np.mean(np.log(avg_psd + 1e-10))) / np.mean(
+                avg_psd
+            )
+
+            # Compute spectral slope (should be ~0 for white noise)
+            # Use log-log regression on frequencies > 0.1 * Nyquist
+            valid_idx = freqs > 0.1 * np.max(freqs)
+            if np.sum(valid_idx) > 5:
+                log_freqs = np.log(freqs[valid_idx])
+                log_psd = np.log(avg_psd[valid_idx] + 1e-10)
+                slope, _ = np.polyfit(log_freqs, log_psd, 1)
+            else:
+                slope = float("nan")
+
+            # Compute high-frequency power (should be significant for white noise)
+            high_freq_idx = freqs > 0.5 * np.max(freqs)
+            high_freq_power = (
+                np.mean(avg_psd[high_freq_idx]) if np.any(high_freq_idx) else 0.0
+            )
+
+            # White spectrum criteria
+            white_spectrum = (
+                spectral_flatness > 0.8
+                and abs(slope) < 0.5  # High flatness
+                and high_freq_power  # Small slope
+                > 0.1  # Significant high-frequency content
+            )
+
+            return {
+                "spectral_flatness": spectral_flatness,
+                "spectral_slope": slope,
+                "high_freq_power": high_freq_power,
+                "white_spectrum": white_spectrum,
+                "frequency_range": (freqs.min(), freqs.max()),
+            }
+        except Exception as e:
+            logger.warning(f"Spectral analysis failed: {e}")
+            return {
+                "spectral_flatness": float("nan"),
+                "spectral_slope": float("nan"),
+                "high_freq_power": float("nan"),
+                "white_spectrum": False,
+                "frequency_range": (float("nan"), float("nan")),
+            }
 
 
 @dataclass
@@ -50,15 +419,10 @@ class EvaluationReport:
     dataset_name: str
     domain: str
 
-    # Standard metrics
-    psnr: MetricResult
-    ssim: MetricResult
-    lpips: MetricResult
-    ms_ssim: MetricResult
-
     # Physics metrics
     chi2_consistency: MetricResult
-    residual_whiteness: MetricResult
+    residual_distribution: MetricResult  # N(0,1) test
+    residual_whiteness: MetricResult  # Spectral flatness
     bias_analysis: MetricResult
 
     # Domain-specific metrics
@@ -78,11 +442,8 @@ class EvaluationReport:
         data = json.loads(json_str)
         # Convert nested dicts back to MetricResult objects
         for key in [
-            "psnr",
-            "ssim",
-            "lpips",
-            "ms_ssim",
             "chi2_consistency",
+            "residual_distribution",
             "residual_whiteness",
             "bias_analysis",
         ]:
@@ -97,336 +458,7 @@ class EvaluationReport:
         return cls(**data)
 
 
-class StandardMetrics:
-    """Standard image quality metrics implementation."""
-
-    def __init__(self, device: str = "cuda"):
-        """
-        Initialize standard metrics.
-
-        Args:
-            device: Device for computation ('cuda' or 'cpu')
-        """
-        self.device = device
-        self._lpips_net = None
-
-    def _get_lpips_net(self):
-        """Lazy loading of LPIPS network."""
-        if self._lpips_net is None:
-            try:
-                import lpips
-
-                self._lpips_net = lpips.LPIPS(net="alex").to(self.device)
-                logger.info("LPIPS network loaded successfully")
-            except ImportError:
-                logger.warning("LPIPS not available. Install with: pip install lpips")
-                self._lpips_net = None
-        return self._lpips_net
-
-    def compute_psnr(
-        self,
-        pred: torch.Tensor,
-        target: torch.Tensor,
-        data_range: float = 1.0,
-        mask: Optional[torch.Tensor] = None,
-    ) -> MetricResult:
-        """
-        Compute Peak Signal-to-Noise Ratio.
-
-        Args:
-            pred: Predicted image [B, C, H, W]
-            target: Ground truth image [B, C, H, W]
-            data_range: Maximum possible pixel value
-            mask: Valid pixel mask [B, C, H, W]
-
-        Returns:
-            PSNR metric result
-        """
-        if pred.shape != target.shape:
-            raise ValueError(
-                f"Shape mismatch: pred {pred.shape} vs target {target.shape}"
-            )
-
-        # Apply mask if provided
-        if mask is not None:
-            pred = pred * mask
-            target = target * mask
-            valid_pixels = mask.sum()
-            if valid_pixels == 0:
-                return MetricResult(value=0.0, metadata={"error": "No valid pixels"})
-
-        # Compute MSE
-        mse = F.mse_loss(pred, target, reduction="mean")
-
-        # Handle perfect reconstruction
-        if mse.item() < 1e-10:
-            psnr_value = 100.0  # Very high PSNR for near-perfect reconstruction
-        else:
-            psnr_value = 20 * torch.log10(data_range / torch.sqrt(mse))
-            psnr_value = psnr_value.item()
-
-        # Compute confidence interval (bootstrap estimate)
-        if pred.numel() > 1000:  # Only for reasonably sized images
-            ci = self._bootstrap_psnr_ci(pred, target, data_range, mask)
-        else:
-            ci = None
-
-        return MetricResult(
-            value=psnr_value,
-            confidence_interval=ci,
-            metadata={"mse": mse.item(), "data_range": data_range},
-        )
-
-    def compute_ssim(
-        self,
-        pred: torch.Tensor,
-        target: torch.Tensor,
-        data_range: float = 1.0,
-        mask: Optional[torch.Tensor] = None,
-    ) -> MetricResult:
-        """
-        Compute Structural Similarity Index.
-
-        Args:
-            pred: Predicted image [B, C, H, W]
-            target: Ground truth image [B, C, H, W]
-            data_range: Maximum possible pixel value
-            mask: Valid pixel mask [B, C, H, W]
-
-        Returns:
-            SSIM metric result
-        """
-        if pred.shape != target.shape:
-            raise ValueError(
-                f"Shape mismatch: pred {pred.shape} vs target {target.shape}"
-            )
-
-        # Convert to numpy for skimage SSIM
-        pred_np = pred.detach().cpu().numpy()
-        target_np = target.detach().cpu().numpy()
-
-        ssim_values = []
-
-        for b in range(pred.shape[0]):
-            for c in range(pred.shape[1]):
-                pred_img = pred_np[b, c]
-                target_img = target_np[b, c]
-
-                # Apply mask if provided
-                if mask is not None:
-                    mask_img = mask[b, c].detach().cpu().numpy()
-                    # For SSIM, we need to handle masked regions carefully
-                    # Set masked regions to mean value to minimize impact
-                    mean_val = (
-                        target_img[mask_img > 0.5].mean()
-                        if (mask_img > 0.5).any()
-                        else 0.5
-                    )
-                    pred_img = pred_img * mask_img + mean_val * (1 - mask_img)
-                    target_img = target_img * mask_img + mean_val * (1 - mask_img)
-
-                # Compute SSIM
-                ssim_val = ssim_skimage(
-                    target_img,
-                    pred_img,
-                    data_range=data_range,
-                    gaussian_weights=True,
-                    sigma=1.5,
-                    use_sample_covariance=False,
-                )
-                ssim_values.append(ssim_val)
-
-        mean_ssim = np.mean(ssim_values)
-        std_ssim = np.std(ssim_values) if len(ssim_values) > 1 else 0.0
-
-        # Confidence interval
-        if len(ssim_values) > 1:
-            ci_low = mean_ssim - 1.96 * std_ssim / np.sqrt(len(ssim_values))
-            ci_high = mean_ssim + 1.96 * std_ssim / np.sqrt(len(ssim_values))
-            ci = (ci_low, ci_high)
-        else:
-            ci = None
-
-        return MetricResult(
-            value=mean_ssim,
-            confidence_interval=ci,
-            metadata={"std": std_ssim, "num_channels": len(ssim_values)},
-        )
-
-    def compute_lpips(
-        self,
-        pred: torch.Tensor,
-        target: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-    ) -> MetricResult:
-        """
-        Compute Learned Perceptual Image Patch Similarity.
-
-        Args:
-            pred: Predicted image [B, C, H, W]
-            target: Ground truth image [B, C, H, W]
-            mask: Valid pixel mask [B, C, H, W]
-
-        Returns:
-            LPIPS metric result
-        """
-        lpips_net = self._get_lpips_net()
-        if lpips_net is None:
-            return MetricResult(
-                value=float("nan"), metadata={"error": "LPIPS not available"}
-            )
-
-        if pred.shape != target.shape:
-            raise ValueError(
-                f"Shape mismatch: pred {pred.shape} vs target {target.shape}"
-            )
-
-        # Ensure images are in [-1, 1] range for LPIPS
-        pred_norm = pred * 2.0 - 1.0
-        target_norm = target * 2.0 - 1.0
-
-        # Handle single channel images by replicating to 3 channels
-        if pred.shape[1] == 1:
-            pred_norm = pred_norm.repeat(1, 3, 1, 1)
-            target_norm = target_norm.repeat(1, 3, 1, 1)
-
-        pred_norm = pred_norm.to(self.device)
-        target_norm = target_norm.to(self.device)
-
-        with torch.no_grad():
-            lpips_values = lpips_net(pred_norm, target_norm)
-
-        # Apply mask weighting if provided
-        if mask is not None:
-            mask = mask.to(self.device)
-            # Average mask over channels if multi-channel
-            if mask.shape[1] > 1:
-                mask = mask.mean(dim=1, keepdim=True)
-            # Resize mask to match LPIPS output if needed
-            if mask.shape[-2:] != lpips_values.shape[-2:]:
-                mask = F.interpolate(
-                    mask, size=lpips_values.shape[-2:], mode="bilinear"
-                )
-
-            # Weight LPIPS values by mask
-            valid_pixels = mask.sum()
-            if valid_pixels > 0:
-                lpips_values = (lpips_values * mask).sum() / valid_pixels
-            else:
-                lpips_values = torch.tensor(float("nan"))
-        else:
-            lpips_values = lpips_values.mean()
-
-        return MetricResult(value=lpips_values.item(), metadata={"network": "alex"})
-
-    def compute_ms_ssim(
-        self,
-        pred: torch.Tensor,
-        target: torch.Tensor,
-        data_range: float = 1.0,
-        mask: Optional[torch.Tensor] = None,
-    ) -> MetricResult:
-        """
-        Compute Multi-Scale Structural Similarity Index.
-
-        Args:
-            pred: Predicted image [B, C, H, W]
-            target: Ground truth image [B, C, H, W]
-            data_range: Maximum possible pixel value
-            mask: Valid pixel mask [B, C, H, W]
-
-        Returns:
-            MS-SSIM metric result
-        """
-        try:
-            from pytorch_msssim import ms_ssim
-        except ImportError:
-            logger.warning(
-                "pytorch-msssim not available. Install with: pip install pytorch-msssim"
-            )
-            return MetricResult(
-                value=float("nan"), metadata={"error": "MS-SSIM not available"}
-            )
-
-        if pred.shape != target.shape:
-            raise ValueError(
-                f"Shape mismatch: pred {pred.shape} vs target {target.shape}"
-            )
-
-        # MS-SSIM requires minimum image size
-        min_size = 160  # Minimum size for 5 scales
-        if min(pred.shape[-2:]) < min_size:
-            # Pad images to minimum size
-            pad_h = max(0, min_size - pred.shape[-2])
-            pad_w = max(0, min_size - pred.shape[-1])
-            pred = F.pad(pred, (0, pad_w, 0, pad_h), mode="reflect")
-            target = F.pad(target, (0, pad_w, 0, pad_h), mode="reflect")
-            if mask is not None:
-                mask = F.pad(mask, (0, pad_w, 0, pad_h), mode="constant", value=0)
-
-        pred = pred.to(self.device)
-        target = target.to(self.device)
-
-        # Apply mask by setting masked regions to target values
-        if mask is not None:
-            mask = mask.to(self.device)
-            pred = pred * mask + target * (1 - mask)
-
-        with torch.no_grad():
-            ms_ssim_val = ms_ssim(
-                pred, target, data_range=data_range, size_average=True
-            )
-
-        return MetricResult(
-            value=ms_ssim_val.item(), metadata={"data_range": data_range, "scales": 5}
-        )
-
-    def _bootstrap_psnr_ci(
-        self,
-        pred: torch.Tensor,
-        target: torch.Tensor,
-        data_range: float,
-        mask: Optional[torch.Tensor],
-        n_bootstrap: int = 100,
-    ) -> Tuple[float, float]:
-        """Compute bootstrap confidence interval for PSNR."""
-        psnr_values = []
-
-        # Flatten for bootstrap sampling
-        pred_flat = pred.flatten()
-        target_flat = target.flatten()
-        if mask is not None:
-            mask_flat = mask.flatten()
-            valid_idx = mask_flat > 0.5
-            pred_flat = pred_flat[valid_idx]
-            target_flat = target_flat[valid_idx]
-
-        n_samples = len(pred_flat)
-        if n_samples < 100:
-            return None
-
-        for _ in range(n_bootstrap):
-            # Bootstrap sample
-            idx = torch.randint(0, n_samples, (n_samples,))
-            pred_boot = pred_flat[idx]
-            target_boot = target_flat[idx]
-
-            # Compute PSNR
-            mse = F.mse_loss(pred_boot, target_boot)
-            if mse.item() < 1e-10:
-                psnr_boot = 100.0
-            else:
-                psnr_boot = 20 * torch.log10(data_range / torch.sqrt(mse))
-                psnr_boot = psnr_boot.item()
-
-            psnr_values.append(psnr_boot)
-
-        # Compute 95% confidence interval
-        psnr_values = np.array(psnr_values)
-        ci_low = np.percentile(psnr_values, 2.5)
-        ci_high = np.percentile(psnr_values, 97.5)
-
-        return (ci_low, ci_high)
+# StandardMetrics class removed - now using torchmetrics and piq in sampling script
 
 
 class PhysicsMetrics:
@@ -946,9 +978,9 @@ class EvaluationSuite:
             device: Device for computation ('cuda' or 'cpu')
         """
         self.device = device
-        self.standard_metrics = StandardMetrics(device)
         self.physics_metrics = PhysicsMetrics()
         self.domain_metrics = DomainSpecificMetrics()
+        self.residual_analyzer = ResidualAnalyzer(device)
 
         logger.info(f"EvaluationSuite initialized on device: {device}")
 
@@ -991,24 +1023,52 @@ class EvaluationSuite:
 
         logger.info(f"Evaluating {method_name} on {dataset_name} ({domain})")
 
-        # Standard metrics
-        logger.debug("Computing standard metrics...")
-        psnr = self.standard_metrics.compute_psnr(pred, target, mask=mask)
-        ssim = self.standard_metrics.compute_ssim(pred, target, mask=mask)
-        lpips = self.standard_metrics.compute_lpips(pred, target, mask=mask)
-        ms_ssim = self.standard_metrics.compute_ms_ssim(pred, target, mask=mask)
+        # Convert to electron space for consistent metrics
+        pred_electrons = pred * scale + background
+        target_electrons = target * scale + background
+        data_range_electrons = scale
 
         # Physics metrics
         logger.debug("Computing physics metrics...")
         chi2 = self.physics_metrics.compute_chi2_consistency(
             pred, noisy, scale, background, read_noise, mask
         )
-        whiteness = self.physics_metrics.compute_residual_whiteness(
-            pred, noisy, scale, background, mask
-        )
-        bias = self.physics_metrics.compute_bias_analysis(
-            pred, noisy, scale, background, mask
-        )
+
+        # Residual analysis
+        try:
+            residual_stats = self.residual_analyzer.analyze_residuals(
+                pred_electrons, noisy, read_noise, mask
+            )
+            dist_meta = {
+                "mean": residual_stats["mean"],
+                "std_dev": residual_stats["std_dev"],
+                "ks_statistic": residual_stats["ks_statistic"],
+                "ks_pvalue": residual_stats["ks_pvalue"],
+            }
+            residual_dist = MetricResult(
+                value=dist_meta["ks_statistic"], metadata=dist_meta
+            )
+
+            whiteness_meta = {
+                "spectral_flatness": residual_stats["whiteness_spectral_flatness"],
+                "autocorr_x": residual_stats["autocorrelation_lag1_x"],
+                "autocorr_y": residual_stats["autocorrelation_lag1_y"],
+            }
+            residual_whiteness = MetricResult(
+                value=whiteness_meta["spectral_flatness"], metadata=whiteness_meta
+            )
+
+            bias = MetricResult(
+                value=abs(residual_stats["mean"]),
+                metadata={"mean_residual": residual_stats["mean"]},
+            )
+
+        except AnalysisError as e:
+            logger.warning(f"Residual analysis failed: {e}")
+            nan_result = MetricResult(value=float("nan"), metadata={"error": str(e)})
+            residual_dist = nan_result
+            residual_whiteness = nan_result
+            bias = nan_result
 
         # Domain-specific metrics
         logger.debug("Computing domain-specific metrics...")
@@ -1046,8 +1106,6 @@ class EvaluationSuite:
             domain_metrics_dict["resolution_preservation"] = resolution
 
         elif domain == "photography":
-            # For photography, focus on perceptual quality
-            # Resolution preservation is still relevant
             resolution = self.domain_metrics.compute_resolution_metric(
                 pred, target, mask=mask
             )
@@ -1060,12 +1118,9 @@ class EvaluationSuite:
             method_name=method_name,
             dataset_name=dataset_name,
             domain=domain,
-            psnr=psnr,
-            ssim=ssim,
-            lpips=lpips,
-            ms_ssim=ms_ssim,
             chi2_consistency=chi2,
-            residual_whiteness=whiteness,
+            residual_distribution=residual_dist,
+            residual_whiteness=residual_whiteness,
             bias_analysis=bias,
             domain_metrics=domain_metrics_dict,
             num_images=pred.shape[0],
@@ -1074,7 +1129,7 @@ class EvaluationSuite:
 
         logger.info(f"Evaluation completed in {processing_time:.2f}s")
         logger.info(
-            f"PSNR: {psnr.value:.2f} dB, SSIM: {ssim.value:.3f}, χ²: {chi2.value:.3f}"
+            f"χ²: {chi2.value:.3f}, Res-KS: {residual_dist.value:.3f}"
         )
 
         return report
@@ -1118,11 +1173,10 @@ class EvaluationSuite:
 
             metrics_comparison = {
                 "methods": methods,
-                "psnr": [r.psnr.value for r in group_reports],
-                "ssim": [r.ssim.value for r in group_reports],
-                "lpips": [r.lpips.value for r in group_reports],
-                "ms_ssim": [r.ms_ssim.value for r in group_reports],
                 "chi2_consistency": [r.chi2_consistency.value for r in group_reports],
+                "residual_distribution": [
+                    r.residual_distribution.value for r in group_reports
+                ],
                 "residual_whiteness": [
                     r.residual_whiteness.value for r in group_reports
                 ],
@@ -1142,23 +1196,19 @@ class EvaluationSuite:
                 if metric_name == "methods":
                     continue
 
-                # Handle NaN values
                 valid_values = [(i, v) for i, v in enumerate(values) if not np.isnan(v)]
                 if not valid_values:
                     best_methods[metric_name] = "N/A"
                     continue
 
-                # Determine if higher or lower is better
                 if metric_name in [
-                    "lpips",
                     "chi2_consistency",
                     "bias_analysis",
                     "photometry_error",
+                    "residual_distribution",
                 ]:
-                    # Lower is better
                     best_idx = min(valid_values, key=lambda x: x[1])[0]
                 else:
-                    # Higher is better
                     best_idx = max(valid_values, key=lambda x: x[1])[0]
 
                 best_methods[metric_name] = methods[best_idx]
@@ -1193,7 +1243,6 @@ class EvaluationSuite:
         if not reports:
             return {}
 
-        # Group by method and domain
         grouped = {}
         for report in reports:
             key = f"{report.method_name}_{report.domain}"
@@ -1204,47 +1253,46 @@ class EvaluationSuite:
         summary = {}
 
         for key, group_reports in grouped.items():
-            # Split on last underscore to handle method names with underscores
             parts = key.rsplit("_", 1)
             if len(parts) == 2:
                 method_name, domain = parts
             else:
                 method_name, domain = key, "unknown"
 
-            # Collect all metric values
-            psnr_values = [
-                r.psnr.value for r in group_reports if not np.isnan(r.psnr.value)
-            ]
-            ssim_values = [
-                r.ssim.value for r in group_reports if not np.isnan(r.ssim.value)
-            ]
             chi2_values = [
                 r.chi2_consistency.value
                 for r in group_reports
                 if not np.isnan(r.chi2_consistency.value)
+            ]
+            residual_ks_values = [
+                r.residual_distribution.value
+                for r in group_reports
+                if not np.isnan(r.residual_distribution.value)
             ]
 
             summary[key] = {
                 "method": method_name,
                 "domain": domain,
                 "num_evaluations": len(group_reports),
-                "psnr_stats": {
-                    "mean": np.mean(psnr_values) if psnr_values else float("nan"),
-                    "std": np.std(psnr_values) if psnr_values else float("nan"),
-                    "min": np.min(psnr_values) if psnr_values else float("nan"),
-                    "max": np.max(psnr_values) if psnr_values else float("nan"),
-                },
-                "ssim_stats": {
-                    "mean": np.mean(ssim_values) if ssim_values else float("nan"),
-                    "std": np.std(ssim_values) if ssim_values else float("nan"),
-                    "min": np.min(ssim_values) if ssim_values else float("nan"),
-                    "max": np.max(ssim_values) if ssim_values else float("nan"),
-                },
                 "chi2_stats": {
                     "mean": np.mean(chi2_values) if chi2_values else float("nan"),
                     "std": np.std(chi2_values) if chi2_values else float("nan"),
                     "min": np.min(chi2_values) if chi2_values else float("nan"),
                     "max": np.max(chi2_values) if chi2_values else float("nan"),
+                },
+                "residual_ks_stats": {
+                    "mean": np.mean(residual_ks_values)
+                    if residual_ks_values
+                    else float("nan"),
+                    "std": np.std(residual_ks_values)
+                    if residual_ks_values
+                    else float("nan"),
+                    "min": np.min(residual_ks_values)
+                    if residual_ks_values
+                    else float("nan"),
+                    "max": np.max(residual_ks_values)
+                    if residual_ks_values
+                    else float("nan"),
                 },
                 "avg_processing_time": np.mean(
                     [r.processing_time for r in group_reports]

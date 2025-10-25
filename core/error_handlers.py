@@ -1,5 +1,5 @@
 """
-Advanced error handling utilities for Poisson-Gaussian Diffusion.
+Error handling utilities for Poisson-Gaussian Diffusion.
 
 This module provides sophisticated error handling, recovery mechanisms,
 and diagnostic tools for robust operation in production environments.
@@ -32,6 +32,8 @@ from .exceptions import (
 class ErrorHandler:
     """
     Centralized error handling with recovery mechanisms.
+
+    Note: This class is designed to be pickle-safe for distributed training.
     """
 
     def __init__(
@@ -48,13 +50,19 @@ class ErrorHandler:
             enable_recovery: Whether to attempt automatic recovery
             strict_mode: Whether to raise all errors (no recovery)
         """
-        self.logger = logger or logging.getLogger(__name__)
+        # Store logger name instead of logger instance to avoid pickle issues
+        self._logger_name = logger.name if logger else __name__
         self.enable_recovery = enable_recovery and not strict_mode
         self.strict_mode = strict_mode
 
         # Error statistics
         self.error_counts: Dict[str, int] = {}
         self.recovery_counts: Dict[str, int] = {}
+
+    @property
+    def logger(self):
+        """Lazy logger property to avoid pickling issues."""
+        return logging.getLogger(self._logger_name)
 
     def handle_error(
         self,
@@ -200,7 +208,6 @@ class NumericalStabilityManager:
             else:
                 raise NumericalStabilityError(f"{name} contains Inf values")
 
-        # Check range violations
         if self.range_min is not None:
             below_min = fixed_tensor < self.range_min
             if below_min.any():
@@ -227,7 +234,6 @@ class NumericalStabilityManager:
                         f"{name} contains values above maximum {self.range_max}"
                     )
 
-        # Log issues if any were found
         if issues and fix_issues:
             self.logger.warning(f"Fixed {name}: {', '.join(issues)}")
 

@@ -1,0 +1,43 @@
+# Photography domain configuration
+# Overrides for default.yaml
+# Based on actual data from metadata_photography_incremental.json
+# Electron range: ~29 - 79351 electrons (95th percentile: ~79351)
+
+# Physical parameters (from actual dataset statistics)
+physics:
+  s: 79351.0  # Scale factor (95th percentile electron_max from data)
+  sigma_r: 3.6  # Read noise (median from data: 3.56 electrons)
+  background: 0.0  # Background level
+
+# Domain configuration
+domain:
+  type: "photo"
+
+# Data configuration
+data:
+  image_size: 256
+  target_size: 64
+  channels: 3  # RGB
+
+# Guidance configuration
+guidance:
+  enabled: true
+  mode: "wls"
+  kappa: 0.5
+  tau: 0.01
+
+# Sampling configuration
+sampling:
+  num_steps: 50
+  sigma_min: 0.002
+  sigma_max: 80.0
+  rho: 7.0
+
+# Training specific
+training:
+  data_root: "/home/jilab/Jae/dataset/processed/png_tiles/photography"
+  max_steps: 200000
+  batch_size: 1
+  gradient_accumulation_steps: 4
+  learning_rate: 5.0e-6
+  target_size: 64

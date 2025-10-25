@@ -8,6 +8,7 @@ This module contains:
 - Model factory functions
 """
 
+from .edm_native_sampler import EDMNativeSampler, EDMNativeSamplingConfig
 from .edm_wrapper import DomainEncoder, EDMModelWrapper, FiLMLayer
 from .sampler import EDMPosteriorSampler, SamplingConfig
 
@@ -17,4 +18,6 @@ __all__ = [
     "FiLMLayer",
     "EDMPosteriorSampler",
     "SamplingConfig",
+    "EDMNativeSampler",
+    "EDMNativeSamplingConfig",
 ]
