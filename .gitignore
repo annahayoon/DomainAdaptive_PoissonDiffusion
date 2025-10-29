@@ -271,6 +271,9 @@ run_edm_native_train.sh
 # All markdown files in root directory
 /*.md
 
+# All txt files in root directory
+/*.txt
+
 # Temporary documentation files
 *_FIX*.md
 *_SUMMARY*.md
