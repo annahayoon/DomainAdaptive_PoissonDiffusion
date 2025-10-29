@@ -268,8 +268,8 @@ run_*gpu*.sh
 run_memory_optimized*.sh
 run_edm_native_train.sh
 
-# All markdown files
-*.md
+# All markdown files in root directory
+/*.md
 
 # Temporary documentation files
 *_FIX*.md
