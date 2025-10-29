@@ -1,9 +1,0 @@
-# Dataset aliases for safe access
-alias dataset='cd /home/jilab/Jae/dataset'
-alias dataset_list='/home/jilab/Jae/readonly_dataset_helper.sh list'
-alias dataset_info='/home/jilab/Jae/readonly_dataset_helper.sh info'
-alias dataset_copy='/home/jilab/Jae/readonly_dataset_helper.sh copy'
-alias dataset_working='/home/jilab/Jae/readonly_dataset_helper.sh working_copy'
-
-# Safe dataset operations
-alias safe_dataset='echo "Use dataset_working to create a safe copy for modifications"'
