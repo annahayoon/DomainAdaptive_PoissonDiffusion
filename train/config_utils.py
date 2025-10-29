@@ -24,33 +24,42 @@ import external.edm.dnnlib
 from external.edm.torch_utils import distributed as dist
 
 
-def load_yaml_config(config_path: Optional[str] = None) -> Dict[str, Any]:
+def load_yaml_config(config_path: str) -> Dict[str, Any]:
     """
     Load configuration from YAML file.
 
     Args:
-        config_path: Path to YAML config file. If None, tries to load from default path.
+        config_path: Path to YAML config file (required).
 
     Returns:
         Configuration dictionary
 
+    Raises:
+        ValueError: If config_path is not provided or file does not exist.
+
     Example:
-        config = load_yaml_config("config/photo.yaml")
+        config = load_yaml_config("config/sony.yaml")
+        config = load_yaml_config("config/fuji.yaml")
+        config = load_yaml_config("config/sony_fuji.yaml")
     """
     if config_path is None:
-        # Try default path
-        config_path = project_root / "config" / "photo.yaml"
-        if not config_path.exists():
-            dist.print0(
-                f"No config file specified and default not found: {config_path}"
-            )
-            return {}
-    else:
-        config_path = Path(config_path)
+        raise ValueError(
+            "Config path is required. Please specify one of:\n"
+            "  - config/sony.yaml\n"
+            "  - config/fuji.yaml\n"
+            "  - config/sony_fuji.yaml"
+        )
+
+    config_path = Path(config_path)
 
     if not config_path.exists():
-        dist.print0(f"WARNING: Config file not found: {config_path}")
-        return {}
+        raise ValueError(
+            f"Config file not found: {config_path}\n"
+            "Available config files:\n"
+            "  - config/sony.yaml\n"
+            "  - config/fuji.yaml\n"
+            "  - config/sony_fuji.yaml"
+        )
 
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
@@ -125,7 +134,7 @@ def setup_output_directory(output_dir):
     if dist.get_rank() == 0:
         os.makedirs(output_dir, exist_ok=True)
         dist.print0("=" * 60)
-        dist.print0("EDM PHOTOGRAPHY TRAINING WITH FLOAT32 .PT FILES")
+        dist.print0("EDM DIFFUSION TRAINING WITH FLOAT32 .PT FILES")
         dist.print0("NO QUANTIZATION - FULL PRECISION")
         dist.print0("=" * 60)
 

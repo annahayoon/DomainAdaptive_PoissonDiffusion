@@ -279,8 +279,8 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default="config/diffusion.yaml",
-        help="Path to YAML config file",
+        required=True,
+        help="Path to YAML config file (e.g., config/sony.yaml, config/fuji.yaml, config/sony_fuji.yaml)",
     )
 
     # Additional options
@@ -299,15 +299,14 @@ def main():
 
     args = parser.parse_args()
 
-    # Load config file
-    config = load_yaml_config(args.config)
-    if config:
+    # Load config file (required - will raise ValueError if missing)
+    try:
+        config = load_yaml_config(args.config)
         apply_config_to_args(args, config)
         dist.print0(f"Configuration loaded from: {args.config}")
-    else:
-        dist.print0(
-            f"WARNING: Could not load config from {args.config}, using defaults"
-        )
+    except ValueError as e:
+        dist.print0(f"ERROR: {e}")
+        sys.exit(1)
 
     # Initialize distributed training
     dist.init()
@@ -336,7 +335,6 @@ def main():
         channels=args.channels,
         use_labels=False,  # ✅ UNCONDITIONAL - no labels
         label_dim=0,  # ✅ No label dimension
-        data_range="normalized",  # Data is in [-1, 1] from preprocessing
     )
 
     train_dataset = external.edm.dnnlib.util.construct_class_by_name(**dataset_kwargs)

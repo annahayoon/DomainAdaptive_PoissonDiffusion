@@ -7,22 +7,25 @@
 # Includes split-screen GPU monitoring for real-time resource tracking
 #
 # CONFIG-DRIVEN APPROACH:
-# This script loads all hyperparameters from config/photo.yaml (or specified CONFIG_FILE)
+# This script loads all hyperparameters from specified CONFIG_FILE (REQUIRED)
 # This centralizes configuration and eliminates duplication between shell and Python scripts
 #
 # USAGE:
-#   1. Start fresh training (auto-generates timestamped directory):
-#      ./run_edm_pt_photography_train.sh
+#   1. Start fresh training with Sony config (auto-generates timestamped directory):
+#      CONFIG_FILE="config/sony.yaml" ./run_edm_pt_photography_train.sh
 #
-#   2. Resume training from existing directory:
-#      OUTPUT_DIR="results/edm_photography_training_20251007_081108" ./run_edm_pt_photography_train.sh
+#   2. Start fresh training with Fuji config:
+#      CONFIG_FILE="config/fuji.yaml" ./run_edm_pt_photography_train.sh
+#
+#   3. Start fresh training with Sony+Fuji combined config:
+#      CONFIG_FILE="config/sony_fuji.yaml" ./run_edm_pt_photography_train.sh
+#
+#   4. Resume training from existing directory:
+#      CONFIG_FILE="config/sony.yaml" OUTPUT_DIR="results/edm_photography_training_20251007_081108" ./run_edm_pt_photography_train.sh
 #      OR just run the script again - it auto-detects and resumes if checkpoints exist
 #
-#   3. Override output directory:
-#      OUTPUT_DIR="results/my_custom_photography_training" ./run_edm_pt_photography_train.sh
-#
-#   4. Use different config file:
-#      CONFIG_FILE="config/my_config.yaml" ./run_edm_pt_photography_train.sh
+#   5. Override output directory:
+#      CONFIG_FILE="config/sony.yaml" OUTPUT_DIR="results/my_custom_photography_training" ./run_edm_pt_photography_train.sh
 #
 # The script automatically:
 # - Loads configuration from YAML file
@@ -171,8 +174,18 @@ monitor_training() {
     done
 }
 
-# Configuration - Load from config file with defaults
-CONFIG_FILE="${CONFIG_FILE:-config/photo.yaml}"
+# Configuration - Load from config file (REQUIRED)
+if [ -z "$CONFIG_FILE" ]; then
+    echo "ERROR: CONFIG_FILE environment variable is required"
+    echo "Please specify one of:"
+    echo "  - config/sony.yaml"
+    echo "  - config/fuji.yaml"
+    echo "  - config/sony_fuji.yaml"
+    echo ""
+    echo "Usage: CONFIG_FILE=config/sony.yaml ./train/run_edm_pt_photography_train.sh"
+    exit 1
+fi
+
 DATA_ROOT="${DATA_ROOT:-dataset/processed/pt_tiles}"
 METADATA_JSON="${METADATA_JSON:-dataset/processed/metadata_photography_incremental.json}"
 

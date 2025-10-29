@@ -1,35 +1,40 @@
+# Requirements for Physics-Informed Diffusion Guidance for Low-Light Enhancement
+# Simplified approach: EDM diffusion + heteroscedastic Poisson-Gaussian guidance
+# Focus: SID dataset, Sony ARW RAW processing, calibration-free pipeline
+
 # Core ML/Scientific Computing
-# PyTorch with CUDA 12.1 support (compatible with CUDA 12.3 driver)
-torch==2.0.1
-torchvision==0.15.2
+# PyTorch with CUDA support for EDM diffusion models
+torch>=2.0.0
+torchvision>=0.15.0
 torchaudio>=2.0.0
-numpy==1.24.3
-scipy==1.10.1
+numpy>=1.24.0
+scipy>=1.10.0
 
-# Image Processing
+# Image Processing and RAW Data
 Pillow>=9.0.0
-rawpy==0.18.1
-tifffile==2023.4.12
-colour-demosaicing==0.2.5
-opencv-python>=4.8.0  # For advanced image processing
-scikit-image==0.21.0  # For image metrics and analysis
-scikit-learn>=1.0.0  # For preprocessing and machine learning utilities
-pyiqa>=0.1.7  # For NIQE and other no-reference quality metrics
-lpips>=0.1.4  # For perceptual similarity metrics
-torchmetrics>=1.0.0  # For PyTorch-native SSIM, PSNR, MSE metrics
-torch-ema==0.3.0
+rawpy>=0.18.0  # For Sony ARW RAW file processing
+tifffile>=2023.4.0
+colour-demosaicing>=0.2.0  # For Bayer pattern demosaicing
+opencv-python>=4.8.0  # For image preprocessing and metrics
+scikit-image>=0.21.0  # For SSIM and image analysis
+scikit-learn>=1.0.0  # For data preprocessing utilities
 
-# Astronomy/Scientific Data
-astropy>=5.0.0
-h5py>=3.8.0  # For HDF5 data handling
+# Image Quality Metrics
+lpips>=0.1.4  # For perceptual similarity (LPIPS)
+torchmetrics>=1.0.0  # For PyTorch-native SSIM, PSNR, MSE
+pyiqa>=0.1.7  # For NIQE no-reference quality metrics
+
+# Diffusion Model Support
+torch-ema>=0.3.0  # For exponential moving averages in diffusion training
+
+# Data Handling
+h5py>=3.8.0  # For HDF5 data storage
 
 # Configuration and Utilities
 PyYAML>=6.0
-tqdm==4.65.0
+tqdm>=4.65.0
 psutil>=5.9.0
 omegaconf>=2.3.0  # For configuration management
-lz4>=4.3.0  # For fast compression
-backports.lzma>=0.0.14  # For lzma compression support
 
 # Logging and Monitoring
 tensorboard>=2.10.0
@@ -46,13 +51,12 @@ flake8>=5.0.0
 matplotlib>=3.5.0
 seaborn>=0.11.0
 
-# Optional: For advanced optimizations (commented out as they can be fragile)
-# triton>=2.0.0  # For custom CUDA kernels
-# flash-attn>=2.0.0  # For memory-efficient attention
-
 # Development utilities
 ipython>=8.0.0
 jupyter>=1.0.0
 
-# HPC and Multi-GPU Training
-# Note: torchrun is built into PyTorch - no additional package needed
+# EDM Diffusion Model Dependencies
+# Note: EDM implementation typically requires:
+# - Custom CUDA kernels (included in EDM repo)
+# - torchrun for multi-GPU training (built into PyTorch)
+# - No additional specialized packages needed beyond PyTorch ecosystem
