@@ -29,8 +29,8 @@ channel_mult: [1, 2, 3, 4]
 device: cuda
 seed: 42
 
-# Dataset configuration (Fuji specific)
-data_root: dataset/processed  # Dataset loader will find fuji/long subdirectory automatically
+# Dataset configuration
+data_root: dataset/processed
 metadata_json: dataset/processed/metadata_photography_incremental.json
-sensor_types: [fuji]  # Only train on Fuji camera tiles
-# Note: Metadata JSON contains all tiles, but training will only use 'long' exposure tiles
+# Note: Currently trains on all sensors. To filter by sensor type, create separate metadata files
+# sensor_types: [fuji]  # NOT CURRENTLY SUPPORTED - requires metadata filtering or dataset modifications

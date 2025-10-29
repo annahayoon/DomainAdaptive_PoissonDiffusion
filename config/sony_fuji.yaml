@@ -29,8 +29,8 @@ channel_mult: [1, 2, 3, 4]
 device: cuda
 seed: 42
 
-# Dataset configuration (Sony + Fuji combined)
-# The dataset loader will automatically detect sensor_type from metadata and load from appropriate subdirectories
-data_root: dataset/processed  # Parent directory containing pt_tiles/sony/ and pt_tiles/fuji/
+# Dataset configuration
+data_root: dataset/processed
 metadata_json: dataset/processed/metadata_photography_incremental.json
-sensor_types: [sony, fuji]  # Train on both Sony and Fuji camera tiles
+# Note: Currently trains on all sensors. To filter by sensor type, create separate metadata files
+# sensor_types: [sony, fuji]  # NOT CURRENTLY SUPPORTED - requires metadata filtering or dataset modifications

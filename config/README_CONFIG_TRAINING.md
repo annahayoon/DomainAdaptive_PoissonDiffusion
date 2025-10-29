@@ -2,29 +2,28 @@
 
 This directory contains YAML configuration files for training EDM models on different camera brands.
 
+**Note**: Currently, all configurations use the same metadata file. To train on specific camera brands, you would need to create separate metadata files or modify the dataset to support sensor filtering.
+
 ## Available Configurations
 
 ### 1. `photo.yaml` (Default)
 General photography configuration - trains on all available sensors.
 - **Data**: All camera brands from `dataset/processed/pt_tiles/`
-- **Sensor Filter**: None (includes all sensors)
+- **Usage**: `./train/run_edm_pt_photography_train.sh`
 
 ### 2. `sony.yaml`
-Sony camera only configuration.
-- **Data**: Sony camera data from `dataset/processed/pt_tiles/sony/long`
-- **Sensor Filter**: `sony` only
+Sony camera only configuration (currently same as default - requires metadata filtering).
+- **Data**: All sensors (config doesn't currently filter by sensor type)
 - **Usage**: `CONFIG_FILE="config/sony.yaml" ./train/run_edm_pt_photography_train.sh`
 
 ### 3. `fuji.yaml`
-Fuji camera only configuration.
-- **Data**: Fuji camera data from `dataset/processed/pt_tiles/fuji/long`
-- **Sensor Filter**: `fuji` only
+Fuji camera only configuration (currently same as default - requires metadata filtering).
+- **Data**: All sensors (config doesn't currently filter by sensor type)
 - **Usage**: `CONFIG_FILE="config/fuji.yaml" ./train/run_edm_pt_photography_train.sh`
 
 ### 4. `sony_fuji.yaml`
-Combined Sony + Fuji cameras configuration.
-- **Data**: Both Sony and Fuji camera data
-- **Sensor Filter**: `sony` and `fuji`
+Combined Sony + Fuji cameras configuration (currently same as default - requires metadata filtering).
+- **Data**: All sensors (config doesn't currently filter by sensor type)
 - **Usage**: `CONFIG_FILE="config/sony_fuji.yaml" ./train/run_edm_pt_photography_train.sh`
 
 ## Configuration Format
@@ -63,7 +62,7 @@ seed: 42
 # Dataset configuration
 data_root: dataset/processed
 metadata_json: dataset/processed/metadata_photography_incremental.json
-sensor_types: [sony]  # or [fuji] or [sony, fuji]
+# Note: sensor_types field exists in config but is not currently used by the dataset loader
 ```
 
 ## Usage Examples
@@ -91,19 +90,27 @@ CONFIG_FILE="config/sony_fuji.yaml" ./train/run_edm_pt_photography_train.sh
 ## How It Works
 
 1. **Config Loading**: The training script loads hyperparameters from the YAML config file
-2. **Sensor Filtering**: The dataset loader filters tiles by `sensor_type` field from metadata
-3. **Path Resolution**: Data loader automatically resolves paths based on `sensor_type` to find the correct subdirectory
-4. **Training**: Only tiles matching the specified sensor types are included in training
+2. **Clean/Noisy Filtering**: The dataset loader filters tiles to only include clean tiles (filters out noisy tiles)
+3. **Path Resolution**: Data loader searches for .pt files in the specified data_root directory
+4. **Training**: Only clean tiles are used for training the prior P(x_clean)
+
+## Current Limitations
+
+**Important**: The current implementation does not support filtering by sensor type. The `sensor_types` field in the config files is present but not used. All configurations currently train on the same dataset from the metadata file.
+
+To train on specific camera brands, you would need to:
+1. Create separate metadata files for each brand, OR
+2. Add sensor type filtering back to the dataset loader
 
 ## Custom Configurations
 
 You can create custom config files by copying one of the existing configs and modifying:
-- `sensor_types`: List of sensor types to include (e.g., `[sony]`, `[fuji]`, `[sony, fuji]`)
 - `data_root`: Path to the processed data directory
+- `metadata_json`: Path to your metadata file
 - Any other hyperparameters as needed
 
 ## Notes
 
-- The dataset loader automatically handles path resolution based on `sensor_type` from metadata
-- Metadata JSON contains all tiles, but training only uses 'long' exposure tiles
-- Sensor type filtering happens at dataset load time for efficiency
+- The dataset loader filters out noisy tiles, keeping only clean tiles for training
+- All config files currently use the same metadata file and data directory
+- The dataset works with clean/noisy pairs, loading clean images for unconditional training
