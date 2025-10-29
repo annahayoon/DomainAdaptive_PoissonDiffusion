@@ -1,17 +1,23 @@
 # Core ML/Scientific Computing
 # PyTorch with CUDA 12.1 support (compatible with CUDA 12.3 driver)
-torch>=2.0.0
-torchvision>=0.15.0
+torch==2.0.1
+torchvision==0.15.2
 torchaudio>=2.0.0
-numpy==1.26.4  # Pinned for PyTorch compatibility (NumPy 2.x causes crashes)
-scipy>=1.7.0
+numpy==1.24.3
+scipy==1.10.1
 
 # Image Processing
 Pillow>=9.0.0
-rawpy>=0.18.0
+rawpy==0.18.1
+tifffile==2023.4.12
+colour-demosaicing==0.2.5
 opencv-python>=4.8.0  # For advanced image processing
-scikit-image>=0.21.0  # For image metrics and analysis
+scikit-image==0.21.0  # For image metrics and analysis
 scikit-learn>=1.0.0  # For preprocessing and machine learning utilities
+pyiqa>=0.1.7  # For NIQE and other no-reference quality metrics
+lpips>=0.1.4  # For perceptual similarity metrics
+torchmetrics>=1.0.0  # For PyTorch-native SSIM, PSNR, MSE metrics
+torch-ema==0.3.0
 
 # Astronomy/Scientific Data
 astropy>=5.0.0
@@ -19,7 +25,7 @@ h5py>=3.8.0  # For HDF5 data handling
 
 # Configuration and Utilities
 PyYAML>=6.0
-tqdm>=4.64.0
+tqdm==4.65.0
 psutil>=5.9.0
 omegaconf>=2.3.0  # For configuration management
 lz4>=4.3.0  # For fast compression

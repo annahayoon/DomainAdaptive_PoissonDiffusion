@@ -953,8 +953,9 @@ class L2GuidedDiffusionBaseline(BaselineMethod):
         ) ** rho
         sigmas = torch.cat([sigmas, torch.zeros(1, device=device)])
 
-        # Initialize from noise
-        x = torch.randn_like(noisy_norm) * sigmas[0]
+        # Initialize from noisy image (not pure noise for denoising)
+        # Add small amount of noise to noisy image for initialization
+        x = noisy_norm + torch.randn_like(noisy_norm) * sigmas[0] * 0.1
 
         for i in range(len(sigmas) - 1):
             sigma_curr = sigmas[i]

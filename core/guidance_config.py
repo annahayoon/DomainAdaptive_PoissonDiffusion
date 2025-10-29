@@ -218,15 +218,15 @@ class GuidancePresets:
             )
 
         elif domain == "astronomy":
-            # Astronomy: maximum precision for extreme low-light
+            # Astronomy: tuned for extreme low-light with reduced white FOV artifacts
             return GuidanceConfig(
-                mode="exact",
-                kappa=1.0,
-                gamma_schedule="linear",
-                gradient_clip=20.0,
-                variance_eps=0.01,
+                mode="wls",  # Changed from "exact" to "wls" for stability
+                kappa=0.2,  # Reduced from 1.0 to 0.2 to prevent over-amplification
+                gamma_schedule="sigma2",  # Changed from "linear" to "sigma2" for better balance
+                gradient_clip=5.0,  # Reduced from 20.0 to 5.0 for stability
+                variance_eps=0.1,  # Increased from 0.01 to 0.1 for dark regions
                 adaptive_kappa=True,
-                normalize_gradients=True,
+                normalize_gradients=False,  # Disabled to prevent over-normalization
             )
 
         else:

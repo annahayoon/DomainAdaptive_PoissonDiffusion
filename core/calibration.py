@@ -150,6 +150,19 @@ class SensorCalibration(CalibrationManager):
             "bit_depth": 14,
             "domain": "photography",
         },
+        "photography_lolv2": {
+            "gain": 1.0,  # electrons/ADU (PNG 8-bit, normalized to [0-255])
+            "black_level": 0,  # ADU (PNG has no black level offset)
+            "white_level": 255,  # ADU (8-bit max)
+            "read_noise": 2.0,  # electrons RMS (estimated for consumer cameras)
+            "dark_current": 0.05,  # electrons/sec
+            "quantum_efficiency": 0.7,  # typical for consumer cameras
+            "pixel_size": 5.0,  # μm (typical consumer camera)
+            "pixel_unit": "um",
+            "sensor_name": "LOLv2_Mixed_Cameras",
+            "bit_depth": 8,
+            "domain": "photography_lolv2",
+        },
         "microscopy": {
             "gain": 0.5,  # electrons/ADU (scientific CMOS)
             "black_level": 100,  # ADU

@@ -1,43 +1,30 @@
-# Photography domain configuration
-# Overrides for default.yaml
-# Based on actual data from metadata_photography_incremental.json
-# Electron range: ~29 - 79351 electrons (95th percentile: ~79351)
+# Photography domain configuration for EDM training
+# This config is used by run_edm_pt_photography_train.sh and train_pt_edm_native_photography.py
 
-# Physical parameters (from actual dataset statistics)
-physics:
-  s: 79351.0  # Scale factor (95th percentile electron_max from data)
-  sigma_r: 3.6  # Read noise (median from data: 3.56 electrons)
-  background: 0.0  # Background level
+# Training hyperparameters
+batch_size: 4
+learning_rate: 0.0001
+total_kimg: 300
 
-# Domain configuration
-domain:
-  type: "photo"
+# EMA configuration
+ema_halflife_kimg: 50
 
-# Data configuration
-data:
-  image_size: 256
-  target_size: 64
-  channels: 3  # RGB
+# Learning rate schedule
+lr_rampup_kimg: 10
 
-# Guidance configuration
-guidance:
-  enabled: true
-  mode: "wls"
-  kappa: 0.5
-  tau: 0.01
+# Training progress
+kimg_per_tick: 12
+snapshot_ticks: 2
 
-# Sampling configuration
-sampling:
-  num_steps: 50
-  sigma_min: 0.002
-  sigma_max: 80.0
-  rho: 7.0
+# Early stopping
+early_stopping_patience: 5
 
-# Training specific
-training:
-  data_root: "/home/jilab/Jae/dataset/processed/png_tiles/photography"
-  max_steps: 200000
-  batch_size: 1
-  gradient_accumulation_steps: 4
-  learning_rate: 5.0e-6
-  target_size: 64
+# Model architecture
+img_resolution: 256
+channels: 3
+model_channels: 192
+channel_mult: [1, 2, 3, 4]
+
+# Device and seed
+device: cuda
+seed: 42

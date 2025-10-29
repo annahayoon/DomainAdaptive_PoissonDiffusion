@@ -317,3 +317,6 @@ data/phase*/
 
 # Preprocessed data directories (usually large)
 data/preprocessed_*/
+
+# Anthropic directory (contains API keys and sensitive data)
+Anthropic/

@@ -1,0 +1,28 @@
+{
+  "test_signals": [
+    5,
+    15,
+    25,
+    50,
+    100,
+    500,
+    1000,
+    2000
+  ],
+  "adaptive_kappas": [
+    0.1,
+    0.1875,
+    0.36250000000000004,
+    0.8,
+    0.8,
+    0.8,
+    0.8,
+    0.8
+  ],
+  "recommendations": [
+    "Implement adaptive kappa in PoissonGaussianGuidance",
+    "Test on low-signal tiles (<50 electrons)",
+    "Compare with constant kappa baseline",
+    "Focus on SSIM/PSNR improvements in failure cases"
+  ]
+}

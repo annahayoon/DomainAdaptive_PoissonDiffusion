@@ -128,8 +128,9 @@ class PoissonGuidance(GuidanceComputer):
         # Var = λ + σ_r² (Poisson shot noise + Gaussian read noise)
         variance = lambda_e + self.read_noise**2
 
-        # Add numerical stability epsilon
-        variance = torch.clamp(variance, min=self.config.variance_eps)
+        # Add numerical stability epsilon - use read noise level as minimum
+        min_variance = max(self.config.variance_eps, self.read_noise**2 * 0.1)
+        variance = torch.clamp(variance, min=min_variance)
 
         # Compute score based on mode
         if self.config.mode == "wls":
@@ -154,13 +155,11 @@ class PoissonGuidance(GuidanceComputer):
         # Scale by s (chain rule: ∂λ/∂x = s)
         gradient = score * self.scale
 
-        # Apply adaptive gradient clipping for numerical stability
+        # Apply simple gradient clipping for numerical stability
         if self.config.gradient_clip > 0:
-            # Adaptive clipping: scale threshold with signal level for better physics preservation
-            signal_level = lambda_e.mean().item()
-            adaptive_threshold = max(self.config.gradient_clip, signal_level * 0.1)
-
-            gradient = torch.clamp(gradient, -adaptive_threshold, adaptive_threshold)
+            gradient = torch.clamp(
+                gradient, -self.config.gradient_clip, self.config.gradient_clip
+            )
 
         # Optional gradient normalization
         if self.config.normalize_gradients:
