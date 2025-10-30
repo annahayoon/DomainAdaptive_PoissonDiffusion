@@ -40,15 +40,16 @@ TILE_SIZE = 256
 # Each tile is 256×256 pixels (standard for diffusion models).
 #
 # Sony cameras (SID dataset):
-# - Typical image size: ~6144×4096 pixels
+# - Typical image size: 2848×4256 pixels (visible dimensions from raw files)
 # - Target grid: 12×18 tiles = 216 tiles per image
-# - Grid size determines: height_per_tile = 4096 / 12 ≈ 341, width_per_tile = 6144 / 18 ≈ 341
+# - Grid size determines: height_per_tile = 2848 / 12 ≈ 237, width_per_tile = 4256 / 18 ≈ 236
 # - We extract 256×256 tiles, leaving small margins
 #
 # Fuji cameras (SID dataset):
-# - Typical image size: ~8192×5376 pixels
-# - Target grid: 16×24 tiles = 384 tiles per image
-# - Grid size determines: height_per_tile = 5376 / 16 ≈ 336, width_per_tile = 8192 / 24 ≈ 341
+# - Typical image size: 4032×6032 pixels (original visible dimensions from raw files)
+# - After 2x downsampling: 2016×3016 pixels
+# - Target grid: 8×12 tiles = 96 tiles per image
+# - Grid size determines: height_per_tile = 2016 / 8 ≈ 252, width_per_tile = 3016 / 12 ≈ 251
 TILE_CONFIGS = {
     "sony": {
         "tile_size": 256,
@@ -57,8 +58,11 @@ TILE_CONFIGS = {
     },
     "fuji": {
         "tile_size": 256,
-        "target_tiles": 384,
-        "target_grid": (16, 24),  # 16 rows, 24 columns - Fuji grid
+        "target_tiles": 96,
+        "target_grid": (
+            8,
+            12,
+        ),  # 8 rows, 12 columns - Fuji grid (after 2x downsampling)
     },
 }
 

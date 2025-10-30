@@ -587,7 +587,7 @@ def pack_raw_to_rgb(
     Returns:
         RGB image (3, H', W') normalized to [0, 1]
         - Sony: (3, H*2, W*2) - upsampled by 2x from packed
-        - Fuji: (3, H*3, W*3) - upsampled by 3x from packed
+        - Fuji: (3, H*3/2, W*3/2) - upsampled by 3x from packed, then downsampled by 2x
     """
     from scipy.ndimage import zoom
 
@@ -640,6 +640,15 @@ def pack_raw_to_rgb(
 
         # Stack to form RGB (3, H*3, W*3)
         rgb = np.stack([R_upsampled, G_upsampled, B_upsampled], axis=0)
+
+        # Downsample RGB by 2x for Fuji (without quantizing pixel values)
+        # This preserves float32 values and reduces image size before tiling
+        C, H, W = rgb.shape
+        rgb_downsampled = zoom(
+            rgb, (1.0, 0.5, 0.5), order=1, mode="reflect"
+        )  # order=1 = bilinear interpolation, preserves float32
+
+        rgb = rgb_downsampled
 
     else:
         raise ValueError(f"Unknown sensor type: {sensor_type}")
@@ -1022,6 +1031,19 @@ def create_file_metadata(
         "all_long_exposures",
         "long_partner",
     )
+
+    # Add sensor calibration values from raw metadata (critical for accurate denormalization)
+    if "black_level" in metadata:
+        # black_level can be array or scalar - store as scalar for consistency
+        black_level = metadata["black_level"]
+        if isinstance(black_level, (list, np.ndarray)):
+            # Use mean if array (per-channel black levels)
+            file_metadata["black_level"] = float(np.mean(black_level))
+        else:
+            file_metadata["black_level"] = float(black_level)
+
+    if "white_level" in metadata:
+        file_metadata["white_level"] = int(metadata["white_level"])
 
     if domain_range:
         file_metadata["domain_range"] = domain_range

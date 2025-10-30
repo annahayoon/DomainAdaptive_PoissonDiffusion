@@ -23,6 +23,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Add project root to Python path to allow imports
+project_root = Path(__file__).parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 import numpy as np
 import rawpy
 import torch
@@ -513,7 +518,7 @@ class SimpleTilesPipeline:
                         :8
                     ],
                     16,
-                )  # noqa: B324
+                )
                 viz_tile_idx = scene_hash % len(
                     tile_infos
                 )  # Ensure index is within bounds
@@ -837,15 +842,24 @@ class SimpleTilesPipeline:
 
                     # Save incremental metadata after EACH file (for better progress tracking)
                     try:
+                        # Determine sensor name for filename
+                        if sid_file_info and file_path in sid_file_info:
+                            sensor_name = sid_file_info[file_path].get(
+                                "camera_type", "unknown"
+                            )
+                        else:
+                            sensor_name = "unknown"
+
                         incremental_path = (
                             self.base_path
                             / "processed"
-                            / f"metadata_{domain_name}_incremental.json"
+                            / f"metadata_{sensor_name}_incremental.json"
                         )
                         # Calculate total tiles from all files
                         total_tiles = sum(len(f["tiles"]) for f in domain_tiles)
                         metadata = {
                             "domain": domain_name,
+                            "sensor": sensor_name,
                             "files_processed": processed_files,
                             "tiles_generated": total_tiles,
                             "files": domain_tiles,
@@ -869,8 +883,16 @@ class SimpleTilesPipeline:
             results["total_tiles"] += total_tiles
 
         # Save comprehensive metadata (includes all calibration, spatial, and processing info)
+        # Determine sensor suffix for filename
+        if sensors:
+            sensor_suffix = "_".join(sensors)
+        else:
+            sensor_suffix = "all"
+
         metadata_path = (
-            self.base_path / "processed" / "comprehensive_tiles_metadata.json"
+            self.base_path
+            / "processed"
+            / f"comprehensive_{sensor_suffix}_tiles_metadata.json"
         )
 
         # Add processing summary to metadata
@@ -898,7 +920,7 @@ class SimpleTilesPipeline:
             backup_path = (
                 self.base_path
                 / "processed"
-                / "comprehensive_tiles_metadata_backup.json"
+                / f"comprehensive_{sensor_suffix}_tiles_metadata_backup.json"
             )
             try:
                 self._safe_write_json(backup_path, comprehensive_metadata)

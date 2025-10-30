@@ -5,7 +5,7 @@
 # Training hyperparameters
 batch_size: 4
 learning_rate: 0.0001
-total_kimg: 20  # Training duration (adjust based on dataset size)
+total_kimg: 200  # Training duration (adjust based on dataset size)
 
 # EMA configuration
 ema_halflife_kimg: 50

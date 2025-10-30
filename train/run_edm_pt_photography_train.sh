@@ -186,8 +186,8 @@ if [ -z "$CONFIG_FILE" ]; then
     exit 1
 fi
 
-DATA_ROOT="${DATA_ROOT:-dataset/processed/pt_tiles}"
-METADATA_JSON="${METADATA_JSON:-dataset/processed/metadata_photography_incremental.json}"
+DATA_ROOT="${DATA_ROOT:-dataset/processed/pt_tiles/fuji}"
+METADATA_JSON="${METADATA_JSON:-dataset/processed/metadata_fuji_incremental.json}"
 
 # Output directory configuration
 # To resume training: Set OUTPUT_DIR to existing directory path

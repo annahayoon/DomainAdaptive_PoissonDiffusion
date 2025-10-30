@@ -4,7 +4,7 @@
 # Training hyperparameters
 batch_size: 4
 learning_rate: 0.0001
-total_kimg: 20  # ~0.4 epochs over 51,840 training tiles (135 long images × 384 tiles)
+total_kimg: 200  # ~0.4 epochs over 51,840 training tiles (135 long images × 384 tiles)
 
 # EMA configuration
 ema_halflife_kimg: 50
@@ -30,7 +30,7 @@ device: cuda
 seed: 42
 
 # Dataset configuration
-data_root: dataset/processed
-metadata_json: dataset/processed/metadata_photography_incremental.json
-# Note: Currently trains on all sensors. To filter by sensor type, create separate metadata files
-# sensor_types: [fuji]  # NOT CURRENTLY SUPPORTED - requires metadata filtering or dataset modifications
+data_root: dataset/processed/pt_tiles/fuji
+metadata_json: dataset/processed/metadata_fuji_incremental.json
+# Note: Training code automatically filters for long exposure data only
+# The SimplePTDataset class handles filtering out short exposure tiles

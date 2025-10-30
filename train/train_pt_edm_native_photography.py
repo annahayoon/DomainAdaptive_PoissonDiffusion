@@ -48,15 +48,8 @@ sys.path.insert(0, str(project_root))
 edm_path = project_root / "external" / "edm"
 sys.path.insert(0, str(edm_path))
 
-# Import EDM native components
-import external.edm.dnnlib
-
-# Import dataset
-from data.dataset import SimplePTDataset
-from external.edm.torch_utils import distributed as dist
-
 # Import training utilities
-from train.config_utils import (
+from config_utils import (
     apply_config_to_args,
     create_loss_config,
     create_network_config,
@@ -67,7 +60,14 @@ from train.config_utils import (
     setup_logging,
     setup_output_directory,
 )
-from train.training_utils import training_loop
+from training_utils import training_loop
+
+# Import EDM native components
+import external.edm.dnnlib
+
+# Import dataset
+from data.dataset import SimplePTDataset
+from external.edm.torch_utils import distributed as dist
 
 # Import validation metrics
 try:
@@ -163,7 +163,7 @@ def create_validation_metrics(device: torch.device):
         return None
 
     metrics = {
-        "psnr": PeakSignalNoiseRatio().to(device),
+        "psnr": PeakSignalNoiseRatio(data_range=2.0).to(device),  # [-1,1] → range=2
         "ssim": StructuralSimilarityIndexMeasure(data_range=2.0).to(
             device
         ),  # [-1,1] → range=2
