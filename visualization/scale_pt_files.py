@@ -4,10 +4,12 @@ Scale .pt image files using domain-specific preprocessing scale factors.
 """
 
 import json
+import sys
 from pathlib import Path
 
-import numpy as np
-import torch
+# Add utils to path
+sys.path.insert(0, str(Path(__file__).parent))
+from utils import get_image_range, load_tensor_from_pt
 
 
 def get_domain_scaling_factor(domain, tile_path):
@@ -33,8 +35,8 @@ def get_domain_scaling_factor(domain, tile_path):
 def scale_and_save_image(image_path, scale_factor, output_path):
     """Scale image by multiplying with scale factor and save."""
     try:
-        # Load the original image
-        tensor = torch.load(image_path)
+        # Load the original image using shared utility
+        tensor = load_tensor_from_pt(image_path)
 
         # Scale the image
         scaled_tensor = tensor * scale_factor
@@ -51,16 +53,7 @@ def scale_and_save_image(image_path, scale_factor, output_path):
         return None
 
 
-def get_image_range(tensor):
-    """Get min and max values of a tensor."""
-    if tensor is None:
-        return None
-
-    return {"min": float(tensor.min()), "max": float(tensor.max())}
-
-
 def process_domain_examples(domain, examples):
-    """Process all examples for a domain."""
     print(f"\n=== Processing {domain.upper()} ===")
 
     # Map domain to optimized directory

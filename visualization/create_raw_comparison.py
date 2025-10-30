@@ -20,76 +20,29 @@ sys.path.append(
     "/home/jilab/anna_OS_ML/PKL-DiffusionDenoising/data/raw/microscopy/Supplementary Files for BioSR/IO_MRC_Python"
 )
 
+# Add utils to path
+sys.path.insert(0, str(Path(__file__).parent))
+from utils import normalize_for_display
+
+# Import preprocessing utilities for consistent demosaicing
+from preprocessing.utils import demosaic_raw_to_rgb, get_pixel_stats
+from preprocessing.visualizations import prepare_for_tile_visualization
+
 
 def load_photography_raw(file_path):
-    """Load photography raw file using rawpy and convert to RGGB format"""
+    """Load photography raw file and demosaic to RGB format using preprocessing utilities"""
     try:
-        import rawpy
+        # Use preprocessing demosaicing function which handles both Sony and Fuji sensors
+        rgb_image, metadata = demosaic_raw_to_rgb(file_path)
 
-        with rawpy.imread(file_path) as raw:
-            # Get raw Bayer data
-            bayer = raw.raw_image_visible.astype(np.float32)
+        if rgb_image is None:
+            return None, None
 
-            # Extract black level and white level
-            black_level = np.array(raw.black_level_per_channel)
-            white_level = raw.white_level
-
-            # Pack Bayer to 4-channel RGGB format (same as domain_processors.py)
-            packed = _pack_bayer_to_4channel(bayer, black_level, "sony")
-
-            metadata = {
-                "black_level": black_level,
-                "white_level": white_level,
-                "camera_model": getattr(raw, "camera", "Sony"),
-                "iso": getattr(raw, "iso", None),
-                "exposure_time": getattr(raw, "exposure_time", None),
-            }
-        return packed, metadata
+        # rgb_image is already in (3, H, W) format, normalized to [0, 1]
+        return rgb_image, metadata
     except Exception as e:
         print(f"Error loading photography file {file_path}: {e}")
         return None, None
-
-
-def _pack_bayer_to_4channel(bayer, black_level, camera_type="sony"):
-    """Convert Bayer pattern to 4-channel packed format (from domain_processors.py)"""
-    H, W = bayer.shape
-
-    # Create black level map
-    black_map = np.zeros((H, W), dtype=np.float32)
-    black_map[0::2, 0::2] = black_level[0]  # R
-    black_map[0::2, 1::2] = black_level[1]  # G1
-    black_map[1::2, 0::2] = black_level[2]  # G2
-    black_map[1::2, 1::2] = black_level[3]  # B
-
-    # Subtract black level
-    bayer_corrected = np.maximum(bayer - black_map, 0)
-
-    # Pack to 4-channel
-    packed = np.zeros((4, H // 2, W // 2), dtype=np.float32)
-    packed[0] = bayer_corrected[0::2, 0::2]  # R
-    packed[1] = bayer_corrected[0::2, 1::2]  # G1
-    packed[2] = bayer_corrected[1::2, 0::2]  # G2
-    packed[3] = bayer_corrected[1::2, 1::2]  # B
-
-    return packed
-
-
-def demosaic_rggb_to_rgb(rggb_image):
-    """Demosaic RGGB Bayer pattern to RGB (from process_tiles_pipeline.py)"""
-    if rggb_image.shape[0] != 4:
-        raise ValueError(
-            f"Expected RGGB with 4 channels, got {rggb_image.shape[0]} channels"
-        )
-
-    R = rggb_image[0]  # Red channel
-    G1 = rggb_image[1]  # Green channel 1
-    G2 = rggb_image[2]  # Green channel 2
-    B = rggb_image[3]  # Blue channel
-
-    G = (G1 + G2) / 2.0
-    rgb_image = np.stack([R, G, B], axis=0)
-
-    return rgb_image
 
 
 def load_microscopy_raw(file_path):
@@ -139,68 +92,18 @@ def load_astronomy_raw(file_path):
 
 
 def extract_brightness_range(data):
-    """Extract brightness range from image data"""
+    """Extract brightness range from image data using preprocessing utilities"""
     if data is None:
         return "N/A"
 
-    # Handle different data shapes
-    if len(data.shape) == 3:
-        if data.shape[0] == 3:  # RGB format
-            # Use all channels for brightness range
-            flat_data = data.flatten()
-        elif data.shape[0] == 4:  # RGGB format
-            flat_data = data[0].flatten()  # Use red channel
-        else:
-            flat_data = data.mean(axis=0).flatten()
-    else:
-        flat_data = data.flatten()
-
-    # Remove any NaN or infinite values
-    flat_data = flat_data[np.isfinite(flat_data)]
-
-    if len(flat_data) == 0:
-        return "N/A"
-
-    min_val = np.min(flat_data)
-    max_val = np.max(flat_data)
-    mean_val = np.mean(flat_data)
+    # Use preprocessing utility for consistent statistics
+    stats = get_pixel_stats(data)
+    min_val, max_val, mean_val, median_val = stats
 
     return f"[{min_val:.1f}, {max_val:.1f}] (mean: {mean_val:.1f})"
 
 
-def normalize_for_display(data, percentile_range=(1, 99)):
-    """Normalize data for display using percentile clipping"""
-    if data is None:
-        return None
-
-    # Handle different data shapes
-    if len(data.shape) == 3:
-        if data.shape[0] == 3:  # RGB format
-            # Convert RGB to grayscale for display
-            display_data = np.mean(data, axis=0)
-        elif data.shape[0] == 4:  # RGGB format
-            display_data = data[0]  # Use red channel
-        else:
-            display_data = data.mean(axis=0)
-    else:
-        display_data = data
-
-    # Ensure we have 2D data for display
-    if len(display_data.shape) != 2:
-        print(f"Warning: Expected 2D data for display, got shape {display_data.shape}")
-        return None
-
-    # Remove NaN and infinite values
-    valid_mask = np.isfinite(display_data)
-    if not np.any(valid_mask):
-        return None
-
-    # Clip to percentiles and normalize to [0, 1]
-    p_low, p_high = np.percentile(display_data[valid_mask], percentile_range)
-    clipped = np.clip(display_data, p_low, p_high)
-    normalized = (clipped - p_low) / (p_high - p_low)
-
-    return normalized
+# Use shared normalize_for_display utility
 
 
 def create_comparison_visualization():
@@ -254,13 +157,33 @@ def create_comparison_visualization():
                 # Extract brightness range
                 brightness_range = extract_brightness_range(data)
 
-                # Handle photography RGGB data specially - demosaic to RGB
-                if domain == "Photography" and data.shape[0] == 4:
-                    # Demosaic RGGB to RGB using the same method as process_tiles_pipeline.py
-                    rgb_data = demosaic_rggb_to_rgb(data)
-                    display_data = normalize_for_display(rgb_data)
+                # Handle photography RGB data - prepare for display using preprocessing utilities
+                if (
+                    domain == "Photography"
+                    and len(data.shape) == 3
+                    and data.shape[0] == 3
+                ):
+                    # Photography data is already RGB (3, H, W) from demosaic_raw_to_rgb
+                    # Use preprocessing visualization utility to prepare for display (CHW -> HWC)
+                    display_data = prepare_for_tile_visualization(data)
+                    if display_data is not None:
+                        # Simple normalization for RGB display (percentile clipping)
+                        valid_mask = np.isfinite(display_data)
+                        if np.any(valid_mask):
+                            p_low, p_high = np.percentile(
+                                display_data[valid_mask], (1, 99)
+                            )
+                            display_data = np.clip(display_data, p_low, p_high)
+                            display_data = (display_data - p_low) / (
+                                p_high - p_low + 1e-8
+                            )
+                        else:
+                            display_data = None
+                    else:
+                        # Fallback to grayscale conversion
+                        display_data = normalize_for_display(data)
                 else:
-                    # Normalize for display
+                    # Normalize for display (grayscale or other formats)
                     display_data = normalize_for_display(data)
 
                 if display_data is not None:
@@ -278,8 +201,13 @@ def create_comparison_visualization():
                             padded[: len(display_data)] = display_data
                             display_data = padded.reshape(next_size, next_size)
 
-                    # Display image
-                    im = ax.imshow(display_data, cmap="gray", aspect="equal")
+                    # Display image - handle RGB vs grayscale
+                    if len(display_data.shape) == 3 and display_data.shape[2] == 3:
+                        # RGB image (H, W, 3) - use RGB display
+                        im = ax.imshow(display_data, aspect="equal")
+                    else:
+                        # Grayscale image - use gray colormap
+                        im = ax.imshow(display_data, cmap="gray", aspect="equal")
                     ax.set_title(
                         f"{domain} - {data_type.capitalize()}\nBrightness: {brightness_range}",
                         fontsize=12,

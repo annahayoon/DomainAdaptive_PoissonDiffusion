@@ -81,6 +81,20 @@ from external.edm.torch_utils import distributed as dist
 # Import sensor calibration
 from sample.sensor_calibration import SensorCalibration
 
+# Import stratified evaluation for core scientific validation
+try:
+    from analysis.stratified_evaluation import (
+        StratifiedEvaluator,
+        format_stratified_results_table,
+    )
+
+    STRATIFIED_EVAL_AVAILABLE = True
+except ImportError:
+    STRATIFIED_EVAL_AVAILABLE = False
+    logger.warning(
+        "Stratified evaluation module not available. Install analysis module for stratified results."
+    )
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
@@ -4148,6 +4162,25 @@ def main():
         help="Skip creating visualization images (only save metrics JSON)",
     )
 
+    # Stratified evaluation arguments (CORE SCIENTIFIC VALIDATION)
+    parser.add_argument(
+        "--evaluate_stratified",
+        action="store_true",
+        help="Enable stratified evaluation by signal level (ADC bins) - REQUIRED for paper submission",
+    )
+    parser.add_argument(
+        "--stratified_domain_min",
+        type=float,
+        default=512,
+        help="Black level ADU for stratification (Sony: 512, Fuji: 1024, Astronomy: 0)",
+    )
+    parser.add_argument(
+        "--stratified_domain_max",
+        type=float,
+        default=16383,
+        help="White level ADU for stratification (Sony: 16383, Fuji: 16383, Astronomy: 1023)",
+    )
+
     # Method selection arguments
     parser.add_argument(
         "--run_methods",
@@ -5273,6 +5306,128 @@ def main():
 
         logger.info(f"Results saved to {sample_dir}")
 
+    # CORE SCIENTIFIC VALIDATION: Stratified evaluation by signal level
+    stratified_results = None
+    stratified_significance = None
+
+    if (
+        args.evaluate_stratified
+        and STRATIFIED_EVAL_AVAILABLE
+        and clean_image is not None
+    ):
+        logger.info("\n" + "=" * 70)
+        logger.info("🔬 STRATIFIED EVALUATION: Computing metrics by signal level")
+        logger.info("=" * 70)
+
+        try:
+            stratified_eval = StratifiedEvaluator(
+                domain_ranges={
+                    "min": args.stratified_domain_min,
+                    "max": args.stratified_domain_max,
+                }
+            )
+
+            # Collect all results across tiles for stratified analysis
+            all_stratified_comparison = {}
+            all_improvements = {}
+
+            for idx, result_info in enumerate(all_results):
+                tile_id = result_info["tile_id"]
+
+                if "restoration_results" not in result_info:
+                    logger.warning(f"Skipping {tile_id}: no restoration_results")
+                    continue
+
+                # Load clean image for this tile
+                clean_path = (
+                    Path(args.clean_dir) / f"{tile_id}.pt" if args.clean_dir else None
+                )
+                if clean_path and clean_path.exists():
+                    clean_tile = torch.load(clean_path, map_location=sampler.device)
+                else:
+                    logger.debug(
+                        f"Clean image not found for {tile_id}, skipping stratified analysis"
+                    )
+                    continue
+
+                # Get restoration results
+                restoration_results = result_info["restoration_results"]
+
+                # Compute stratified metrics
+                stratified_comparison = stratified_eval.compare_methods_stratified(
+                    clean_tile, restoration_results
+                )
+
+                # Log stratified improvements
+                if (
+                    "gaussian_x0" in stratified_comparison
+                    and "pg_x0" in stratified_comparison
+                ):
+                    improvements = stratified_eval.compute_improvement_matrix(
+                        stratified_comparison["gaussian_x0"],
+                        stratified_comparison["pg_x0"],
+                    )
+
+                    logger.info(f"\n  Tile {idx+1}/{len(all_results)}: {tile_id}")
+                    logger.info(f"    Stratified PSNR improvements (PG vs Gaussian):")
+                    for bin_name, gain in improvements.items():
+                        if not np.isnan(gain):
+                            logger.info(f"      {bin_name:12s}: {gain:+.2f} dB")
+
+                    # Store for aggregation
+                    all_stratified_comparison[tile_id] = stratified_comparison
+                    all_improvements[tile_id] = improvements
+
+                result_info["stratified_metrics"] = stratified_comparison
+                result_info["stratified_improvements"] = improvements
+
+            # Aggregate across all tiles
+            if all_stratified_comparison:
+                logger.info("\n" + "-" * 70)
+                logger.info("Aggregated Stratified Results (All Tiles):")
+                logger.info("-" * 70)
+
+                # Statistical testing
+                stratified_significance = stratified_eval.test_statistical_significance(
+                    all_results,
+                    baseline_method="gaussian_x0",
+                    proposed_method="pg_x0",
+                    alpha=0.05,
+                )
+
+                # Log statistical results
+                for bin_name, stats in stratified_significance.items():
+                    if not np.isnan(stats["mean_improvement"]):
+                        sig_marker = "***" if stats.get("significant", False) else "   "
+                        logger.info(
+                            f"  {bin_name:12s}: "
+                            f"Δ PSNR = {stats['mean_improvement']:+.2f}±{stats['std_improvement']:.2f} dB, "
+                            f"p_corrected = {stats['p_value_corrected']:.4f} {sig_marker} "
+                            f"(n={stats['n_samples']})"
+                        )
+
+                # Save stratified results
+                stratified_results = {
+                    "comparison_by_tile": all_stratified_comparison,
+                    "improvements_by_tile": all_improvements,
+                    "statistical_significance": stratified_significance,
+                }
+
+                stratified_results_path = (
+                    Path(args.output_dir) / "stratified_results.json"
+                )
+                with open(stratified_results_path, "w") as f:
+                    json.dump(stratified_results, f, indent=2, default=str)
+
+                logger.info(
+                    f"\n✅ Stratified results saved to {stratified_results_path}"
+                )
+                logger.info("=" * 70)
+
+        except Exception as e:
+            logger.error(f"Stratified evaluation failed: {e}", exc_info=True)
+            logger.warning("Continuing with non-stratified results...")
+
     # Save summary
     summary = {
         "domain": args.domain,
@@ -5359,6 +5514,26 @@ def main():
 
             metric_stats["num_samples"] = len(metrics_for_method)
             summary["comprehensive_aggregate_metrics"][method] = metric_stats
+
+    # Add stratified evaluation results to summary
+    if stratified_results is not None:
+        summary["stratified_evaluation"] = {
+            "enabled": True,
+            "domain_ranges": {
+                "min": args.stratified_domain_min,
+                "max": args.stratified_domain_max,
+            },
+            "statistical_significance": stratified_significance,
+            "num_tiles_analyzed": len(all_stratified_comparison)
+            if "all_stratified_comparison" in locals()
+            else 0,
+        }
+        logger.info("\n✅ Stratified evaluation results included in summary")
+    else:
+        summary["stratified_evaluation"] = {
+            "enabled": False,
+            "reason": "Stratified evaluation not enabled or no clean images provided",
+        }
 
     # Save comprehensive results.json file (contains all detailed information)
     with open(output_dir / "results.json", "w") as f:

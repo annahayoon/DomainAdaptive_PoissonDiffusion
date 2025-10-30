@@ -508,7 +508,12 @@ class SimpleTilesPipeline:
                 import hashlib
 
                 scene_id = sid_info.get("scene_id", "unknown")
-                scene_hash = int(hashlib.md5(scene_id.encode()).hexdigest()[:8], 16)
+                scene_hash = int(
+                    hashlib.md5(scene_id.encode(), usedforsecurity=False).hexdigest()[
+                        :8
+                    ],
+                    16,
+                )  # noqa: B324
                 viz_tile_idx = scene_hash % len(
                     tile_infos
                 )  # Ensure index is within bounds
@@ -598,6 +603,7 @@ class SimpleTilesPipeline:
         max_files_per_domain: int = None,
         create_visualizations: bool = False,
         dry_run: bool = False,
+        sensors: list = None,
     ):
         """Run the complete .pt tiles pipeline with sensor-specific normalization and optional visualizations
 
@@ -631,7 +637,27 @@ class SimpleTilesPipeline:
         sid_file_info = load_sid_split_files(sid_data_path)
 
         # Get all files from SID split files (these are the official files to process)
-        sample_files["photography"] = list(sid_file_info.keys())
+        all_files = list(sid_file_info.keys())
+
+        # Filter by sensor type if specified
+        if sensors:
+            filtered_files = [
+                f for f in all_files if sid_file_info[f].get("camera_type") in sensors
+            ]
+            sample_files["photography"] = filtered_files
+
+            sensor_list = ", ".join(sensors)
+            logger.info(
+                f"Processing {sensor_list} files only: {len(filtered_files)} files"
+            )
+            logger.info(f"Total files in dataset: {len(all_files)}")
+            logger.info(
+                f"Skipping other sensors: {len(all_files) - len(filtered_files)}"
+            )
+        else:
+            # Process all files (default behavior)
+            sample_files["photography"] = all_files
+            logger.info(f"Processing all sensor types: {len(all_files)} files")
 
         # === DRY RUN MODE: Validate without processing ===
         if dry_run:
@@ -918,6 +944,13 @@ def main():
         action="store_true",
         help="Validate configuration without processing (no files written)",
     )
+    parser.add_argument(
+        "--sensors",
+        nargs="+",
+        choices=["sony", "fuji"],
+        default=None,
+        help="Sensor types to process: 'sony', 'fuji', or both (default: all)",
+    )
 
     args = parser.parse_args()
 
@@ -938,7 +971,10 @@ def main():
     # Run .pt tiles pipeline for photography
     pipeline = SimpleTilesPipeline(data_path)
     results = pipeline.run_pt_tiles_pipeline(
-        args.max_files, create_visualizations=args.visualize, dry_run=args.dry_run
+        args.max_files,
+        create_visualizations=args.visualize,
+        dry_run=args.dry_run,
+        sensors=args.sensors,
     )
 
     if results.get("total_tiles", 0) > 0:

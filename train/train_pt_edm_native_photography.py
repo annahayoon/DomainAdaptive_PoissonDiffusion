@@ -8,28 +8,27 @@ TRAINING PHASE (this script):
 - Learn P(x_clean) unconditionally on long-exposure/clean images only
 - No labels, no conditioning on observations
 - Pure unconditional diffusion on clean distribution
+- Dataset is automatically validated to contain only LONG-exposure tiles
 
-INFERENCE PHASE (separate script):
-- Apply inverse problem solver: P(x_clean | y_noisy)
-- Use physics-informed guidance (heteroscedastic Poisson-Gaussian likelihood)
+INFERENCE PHASE (separate script - sample/sample_noisy_pt_lle_PGguidance.py):
+- Load trained unconditional model
+- Apply heteroscedastic Poisson-Gaussian likelihood gradient as guidance
+- Supports BOTH simplified and exact variance formulas:
+  * Simplified: Var ≈ α·s·x + σ_r² (computationally efficient, default)
+  * Exact: Var = α·x/(white-black) + σ_r² (theoretically precise, for ablations)
 - Apply sensor-specific calibration at inference time
 
-This approach is scientifically sound and used in:
-- DPS (Chung et al., CVPR 2023): Diffusion Posterior Sampling
-- DDRM (Kawar et al., NeurIPS 2022): Denoising Diffusion Restoration Models
-- Score-based inverse problems literature
+DATA FORMAT:
+- Preprocessing converts RAW → demosaic to RGB → normalize to [-1, 1]
+- RGB format (not packed RAW) for generalizability:
+  * Works on any RGB image, not just specific camera RAW formats
+  * Enables cross-domain and cross-sensor generalization
+  * Signal-dependent variance structure remains dominant despite interpolation
+- Training uses ONLY long-exposure (clean) tiles
+- Short-exposure (noisy) tiles used only for validation/testing
 
-Preprocessing Input:
-- Raw images → demosaicing, normalization → .pt files in [-1, 1]
-- Metadata JSON with train/validation splits
-- Only CLEAN/LONG-exposure tiles used for prior training
-- SHORT-exposure tiles used for validation/testing only
-
-Expected Data Format:
-- .pt files: float32 tensors, shape (C, H, W), range [-1, 1]
-- Metadata JSON: defines train/validation splits with data_type field
-- data_type="long" (clean): used for training
-- data_type="short" (noisy): used for validation/inference testing
+This approach matches DPS (Diffusion Posterior Sampling) and DDRM paradigms,
+scientifically validated in top venues (CVPR, NeurIPS, ICLR).
 """
 
 import argparse
@@ -53,7 +52,7 @@ sys.path.insert(0, str(edm_path))
 import external.edm.dnnlib
 
 # Import dataset
-from data.dataset import EDMPTDataset
+from data.dataset import SimplePTDataset
 from external.edm.torch_utils import distributed as dist
 
 # Import training utilities
@@ -83,7 +82,9 @@ except ImportError:
     logging.warning("torchmetrics not available - validation metrics disabled")
 
 
-def validate_dataset_compatibility(dataset: EDMPTDataset, device: torch.device) -> bool:
+def validate_dataset_compatibility(
+    dataset: SimplePTDataset, device: torch.device
+) -> bool:
     """
     Validate that dataset is compatible with training expectations.
 
@@ -92,6 +93,8 @@ def validate_dataset_compatibility(dataset: EDMPTDataset, device: torch.device) 
     - Shape is (C, H, W)
     - Values are in [-1, 1] range
     - Only clean/long exposures are loaded
+
+    The _validate_training_data_purity() is called automatically in SimplePTDataset.__init__()
     """
     dist.print0("Validating dataset compatibility...")
 
@@ -176,11 +179,14 @@ def main():
 
     This implements the standard inverse problem paradigm:
     1. Train P(x_clean) unconditionally on clean images
-    2. At inference, solve P(x_clean | y_noisy) using guidance
+    2. At inference, solve P(x_clean | y_noisy) using physics-informed guidance
     3. Guidance encodes domain-specific physics (sensor noise models)
 
     Critical: Only long-exposure (clean) tiles used for training.
     Short-exposure (noisy) tiles used only for validation/testing.
+
+    The dataset's _validate_training_data_purity() method will ASSERT that training
+    data contains only long-exposure images, preventing model corruption.
     """
     parser = argparse.ArgumentParser(
         description="Train unconditional diffusion model on preprocessed clean images"
@@ -275,12 +281,12 @@ def main():
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     parser.add_argument("--device", type=str, default=None, help="Device (cuda/cpu)")
 
-    # Config file argument
+    # Config file argument - REQUIRED
     parser.add_argument(
         "--config",
         type=str,
         required=True,
-        help="Path to YAML config file (e.g., config/sony.yaml, config/fuji.yaml, config/sony_fuji.yaml)",
+        help="Path to YAML config file (e.g., config/diffusion.yaml, config/sony.yaml)",
     )
 
     # Additional options
@@ -327,7 +333,7 @@ def main():
     # Create training dataset - UNCONDITIONAL TRAINING
     # Key: use_labels=False means no class conditioning
     dataset_kwargs = dict(
-        class_name="data.dataset.EDMPTDataset",
+        class_name="data.dataset.SimplePTDataset",
         data_root=args.data_root,
         metadata_json=args.metadata_json,
         split="train",
@@ -425,6 +431,11 @@ def main():
         "- Phase 2 (inference script): Solve P(x_clean | y_noisy) with guidance"
     )
     dist.print0("=" * 70)
+    dist.print0("")
+    dist.print0("INFERENCE GUIDANCE OPTIONS:")
+    dist.print0("  --variance_formula='simplified' (default): Var ≈ α·s·x + σ_r²")
+    dist.print0("  --variance_formula='exact': Var = α·x/(white-black) + σ_r²")
+    dist.print0("")
 
     training_loop(
         run_dir=run_dir,

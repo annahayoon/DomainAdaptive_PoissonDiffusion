@@ -1,10 +1,11 @@
-# Sony camera only configuration for EDM training
-# This config trains exclusively on Sony camera data from sony/long train dataset
+# Generic diffusion model configuration for EDM training
+# Domain-agnostic configuration for unconditional diffusion training
+# Can be used with any preprocessed .pt dataset
 
 # Training hyperparameters
 batch_size: 4
 learning_rate: 0.0001
-total_kimg: 20  # ~0.6 epochs over 34,776 training tiles (161 long images × 216 tiles)
+total_kimg: 20  # Training duration (adjust based on dataset size)
 
 # EMA configuration
 ema_halflife_kimg: 50
@@ -30,7 +31,7 @@ device: cuda
 seed: 42
 
 # Dataset configuration
+# Note: data_root and metadata_json are typically provided via command-line arguments
+# The values below are defaults; override with --data_root and --metadata_json flags
 data_root: dataset/processed
 metadata_json: dataset/processed/metadata_photography_incremental.json
-# Note: Currently trains on all sensors. To filter by sensor type, create separate metadata files
-# sensor_types: [sony]  # NOT CURRENTLY SUPPORTED - requires metadata filtering or dataset modifications

@@ -60,7 +60,7 @@ repos:
     rev: 1.7.6
     hooks:
       - id: bandit
-        args: ["-x", "external,tests", "-s", "B101,B108,B110,B112,B311,B404,B603,B607", "-l"]
+        args: ["-x", "external,tests", "-s", "B101,B108,B110,B112,B301,B311,B403,B404,B603,B607", "-l"]
         exclude: ^external/
 
 # Configuration

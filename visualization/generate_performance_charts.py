@@ -11,10 +11,15 @@ This script analyzes the results from sample_noisy_pt_lle_guidance.py and create
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+# Add utils to path
+sys.path.insert(0, str(Path(__file__).parent))
+from utils import format_method_name, get_method_colors
 
 
 def load_results(summary_json: Path):
@@ -72,28 +77,18 @@ def create_bar_charts(metrics_data, output_dir: Path):
     """Create bar charts for each metric."""
     methods = metrics_data["methods"]
 
-    # Clean up method names for display
+    # Use shared utilities for method names and colors
+    method_colors_map = get_method_colors()
     display_names = []
     colors = []
     for m in methods:
-        if m == "exposure_scaled":
-            display_names.append("Exp Scale")
-            colors.append("#3498db")  # Blue
-        elif m == "gaussian_x0":
-            display_names.append("Gauss (x0)")
-            colors.append("#e67e22")  # Orange
-        elif m == "gaussian_score":
-            display_names.append("Gauss (score)")
-            colors.append("#d35400")  # Dark orange
-        elif m == "pg_x0":
-            display_names.append("PG (x0)")
-            colors.append("#27ae60")  # Green
-        elif m == "pg_score":
-            display_names.append("PG (score)")
-            colors.append("#229954")  # Dark green
-        else:
-            display_names.append(m)
-            colors.append("#95a5a6")  # Gray
+        display_names.append(
+            format_method_name(m)
+            if m
+            in ["exposure_scaled", "gaussian_x0", "gaussian_score", "pg_x0", "pg_score"]
+            else m
+        )
+        colors.append(method_colors_map.get(m, "#95a5a6"))
 
     # Create 2x2 subplot for all metrics
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
@@ -239,21 +234,7 @@ def create_radar_chart(metrics_data, output_dir: Path):
     fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(projection="polar"))
 
     # Plot each method
-    colors_map = {
-        "exposure_scaled": "#3498db",
-        "gaussian_x0": "#e67e22",
-        "gaussian_score": "#d35400",
-        "pg_x0": "#27ae60",
-        "pg_score": "#229954",
-    }
-
-    labels_map = {
-        "exposure_scaled": "Exposure Scaled",
-        "gaussian_x0": "Gaussian (x0)",
-        "gaussian_score": "Gaussian (score)",
-        "pg_x0": "PG (x0)",
-        "pg_score": "PG (score)",
-    }
+    colors_map = get_method_colors()
 
     for i, method in enumerate(methods):
         if method in ["noisy", "clean"]:
@@ -267,7 +248,7 @@ def create_radar_chart(metrics_data, output_dir: Path):
             values,
             "o-",
             linewidth=2,
-            label=labels_map.get(method, method),
+            label=format_method_name(method),
             color=colors_map.get(method, "#95a5a6"),
         )
         ax.fill(angles, values, alpha=0.15, color=colors_map.get(method, "#95a5a6"))
@@ -299,21 +280,7 @@ def create_tradeoff_plots(metrics_data, output_dir: Path):
     """Create trade-off scatter plots."""
     methods = metrics_data["methods"]
 
-    colors_map = {
-        "exposure_scaled": "#3498db",
-        "gaussian_x0": "#e67e22",
-        "gaussian_score": "#d35400",
-        "pg_x0": "#27ae60",
-        "pg_score": "#229954",
-    }
-
-    labels_map = {
-        "exposure_scaled": "Exp Scale",
-        "gaussian_x0": "Gauss (x0)",
-        "gaussian_score": "Gauss (score)",
-        "pg_x0": "PG (x0)",
-        "pg_score": "PG (score)",
-    }
+    colors_map = get_method_colors()
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
@@ -335,12 +302,12 @@ def create_tradeoff_plots(metrics_data, output_dir: Path):
                 color=colors_map.get(method, "#95a5a6"),
                 edgecolors="black",
                 linewidth=2,
-                label=labels_map.get(method, method),
+                label=format_method_name(method),
             )
             ax.text(
                 ssim,
                 lpips,
-                labels_map.get(method, method),
+                format_method_name(method),
                 fontsize=9,
                 ha="center",
                 va="bottom",
@@ -370,12 +337,12 @@ def create_tradeoff_plots(metrics_data, output_dir: Path):
                 color=colors_map.get(method, "#95a5a6"),
                 edgecolors="black",
                 linewidth=2,
-                label=labels_map.get(method, method),
+                label=format_method_name(method),
             )
             ax.text(
                 psnr,
                 niqe,
-                labels_map.get(method, method),
+                format_method_name(method),
                 fontsize=9,
                 ha="center",
                 va="bottom",
@@ -445,17 +412,12 @@ def create_summary_table(metrics_data, output_dir: Path):
         table[(0, i)].set_text_props(weight="bold", color="white")
 
     # Style rows
-    colors_map = {
-        "exposure scaled": "#d6eaf8",
-        "gaussian (x0)": "#fdebd0",
-        "gaussian (score)": "#fad7a0",
-        "pg (x0)": "#d5f4e6",
-        "pg (score)": "#abebc6",
-    }
+    colors_map = get_method_colors()
 
     for i, row in enumerate(table_data):
         method_lower = row[0].lower()
-        color = colors_map.get(method_lower, "#ecf0f1")
+        # Use color from method colors map if available
+        color = colors_map.get(method_lower.replace(" ", "_"), "#ecf0f1")
         for j in range(len(col_labels)):
             table[(i + 1, j)].set_facecolor(color)
 

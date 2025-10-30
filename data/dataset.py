@@ -12,26 +12,13 @@ Key features:
 """
 
 import json
-import logging
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
 
 from core.logging_config import get_logger
-
-# Import EDM components for compatibility
-try:
-    import sys
-
-    edm_path = Path(__file__).parent.parent / "external" / "edm"
-    sys.path.insert(0, str(edm_path))
-    from training.dataset import Dataset as EDMDataset
-except ImportError:
-    EDMDataset = None
 
 logger = get_logger(__name__)
 
@@ -40,7 +27,7 @@ if TYPE_CHECKING:
     pass
 
 
-class EDMPTDataset:
+class SimplePTDataset:
     """
     EDM-compatible dataset for 32-bit float .pt files.
 
@@ -63,9 +50,10 @@ class EDMPTDataset:
         metadata_json: Union[str, Path],
         split: str = "train",
         max_files: Optional[int] = None,
-        seed: int = 42,
         image_size: int = 256,
         channels: int = 3,
+        use_labels: bool = False,
+        label_dim: int = 0,
         **kwargs,
     ):
         """
@@ -76,9 +64,10 @@ class EDMPTDataset:
             metadata_json: Metadata JSON file with predefined splits
             split: Data split (train, validation, test)
             max_files: Maximum number of files to load
-            seed: Random seed for reproducibility
             image_size: Target image size (will validate shape matches)
             channels: Number of channels (1 for grayscale, 3 for RGB)
+            use_labels: Enable conditioning labels? False = label dimension is zero.
+            label_dim: Number of class labels, 0 = unconditional.
             **kwargs: Additional arguments (ignored for compatibility)
         """
 
@@ -87,9 +76,11 @@ class EDMPTDataset:
         self.metadata_json = Path(metadata_json)
         self.split = split
         self.max_files = max_files
-        self.seed = seed
         self.image_size = image_size
         self.channels = channels
+        self._use_labels = use_labels
+        self._label_dim = label_dim if label_dim > 0 else 0
+        self._raw_labels = None
 
         if not self.data_root.exists():
             raise FileNotFoundError(f"Data directory not found: {self.data_root}")
@@ -99,34 +90,32 @@ class EDMPTDataset:
                 f"Metadata JSON file not found: {self.metadata_json}"
             )
 
-        # Find .pt files and create mapping
-        self.image_files, self.noisy_mapping = self._find_paired_files()
+        # Find .pt files
+        self.image_files = self._find_paired_files()
 
         # Create train/val/test split
         self.split_files = self._create_split()
+
+        # Validate training data purity (CRITICAL for physics-informed approach)
+        self._validate_training_data_purity()
 
         # Set up raw shape for EDM compatibility (N, C, H, W)
         self._raw_shape = [len(self.split_files), channels, image_size, image_size]
 
         # Set up basic properties
         self._raw_idx = np.arange(len(self.split_files), dtype=np.int64)
-        self._xflip = np.zeros(len(self.split_files), dtype=np.uint8)
-
-        # Set up dataset properties for EDM compatibility
-        self._name = f"pt_{split}"
-
-        # Cache for loaded images
-        self._cached_images = {}
-        self._cache = False  # Enable caching if needed for speed
 
         logger.info(
-            f"EDMPTDataset ready: {len(self.split_files)} float32 .pt tiles for '{split}' split"
+            f"SimplePTDataset ready: {len(self.split_files)} float32 .pt tiles for '{split}' split"
         )
         logger.info(f"  Shape: [{channels}, {image_size}, {image_size}]")
         logger.info(f"  Data range: [-1, 1] (pre-normalized during preprocessing)")
+        logger.info(
+            f"  Label dimension: {self._label_dim} ({'conditional' if self._use_labels else 'unconditional'})"
+        )
 
-    def _find_paired_files(self) -> Tuple[List[Path], Dict[Path, Path]]:
-        """Find paired clean/noisy .pt files using metadata JSON file."""
+    def _find_paired_files(self) -> List[Path]:
+        """Find long-exposure .pt files using metadata JSON file."""
         logger.info(f"Loading tile metadata from {self.metadata_json}")
 
         with open(self.metadata_json, "r") as f:
@@ -160,44 +149,45 @@ class EDMPTDataset:
 
         split_tiles = tiles_by_split[self.split]
 
-        # FILTER OUT NOISY TILES FOR PRIOR TRAINING (same logic as PNG dataset)
-        clean_tiles_only = []
-        noisy_tiles_filtered = []
+        # FILTER OUT SHORT-EXPOSURE TILES FOR PRIOR TRAINING (only use long-exposure)
+        long_tiles_only = []
+        short_tiles_filtered = []
 
         for tile in split_tiles:
             tile_id = tile.get("tile_id", "")
 
-            # Check if this is a noisy tile - prioritize explicit metadata fields
-            is_noisy = False
+            # Check if this is a short-exposure tile using metadata
+            is_short = False
 
-            # First check explicit metadata fields (for astronomy_v2 and other updated datasets)
-            if "is_clean" in tile:
-                is_noisy = not tile.get("is_clean", True)
-            elif "data_type" in tile:
-                is_noisy = tile.get("data_type", "clean") == "noisy"
+            # Check data_type field (required)
+            if "data_type" in tile:
+                data_type = tile.get("data_type", "long")
+                is_short = data_type == "short"
             else:
-                # Fallback to pattern-based detection for older metadata files
-                if "_0." in tile_id:  # Short exposure (e.g., 0.04s, 0.1s)
-                    is_noisy = True
-                elif tile_id.endswith("_00_0s"):  # Some variations
-                    is_noisy = True
+                # Require explicit data_type field
+                logger.warning(
+                    f"Tile {tile_id} missing 'data_type' field. Assuming long-exposure."
+                )
 
-            if is_noisy:
-                noisy_tiles_filtered.append(tile_id)
+            if is_short:
+                short_tiles_filtered.append(tile_id)
             else:
-                clean_tiles_only.append(tile)
+                long_tiles_only.append(tile)
 
         logger.info(
             f"Split '{self.split}' - Total tiles in metadata: {len(split_tiles)}"
         )
-        logger.info(f"  └─ Clean tiles (prior training): {len(clean_tiles_only)}")
-        logger.info(f"  └─ Noisy tiles (filtered out): {len(noisy_tiles_filtered)}")
+        logger.info(
+            f"  └─ Long-exposure tiles (prior training): {len(long_tiles_only)}"
+        )
+        logger.info(
+            f"  └─ Short-exposure tiles (filtered out): {len(short_tiles_filtered)}"
+        )
 
-        split_tiles = clean_tiles_only  # Use only clean tiles
+        split_tiles = long_tiles_only  # Use only long-exposure tiles
 
-        # Extract clean file paths
-        clean_files = []
-        noisy_mapping = {}
+        # Extract long-exposure file paths
+        long_files = []
 
         for tile in split_tiles:
             tile_id = tile.get("tile_id")
@@ -209,49 +199,33 @@ class EDMPTDataset:
             pt_path_candidates = [
                 # From metadata (if it stores pt_path)
                 Path(tile.get("pt_path", "")),
-                # Replace .png with .pt in png_path
-                Path(str(tile.get("png_path", "")).replace(".png", ".pt")),
                 # Construct from data_root
                 self.data_root / f"{tile_id}.pt",
-                # Try clean subdirectory
-                self.data_root / "clean" / f"{tile_id}.pt",
+                # Try long subdirectory
+                self.data_root / "long" / f"{tile_id}.pt",
             ]
 
-            clean_path = None
+            long_path = None
             for candidate in pt_path_candidates:
                 if candidate.exists():
-                    clean_path = candidate
+                    long_path = candidate
                     break
 
-            if clean_path is None:
-                logger.debug(f"Clean .pt file not found for: {tile_id}")
+            if long_path is None:
+                logger.debug(f"Long-exposure .pt file not found for: {tile_id}")
                 continue
 
-            clean_files.append(clean_path)
+            long_files.append(long_path)
 
-            # Find corresponding noisy file
-            clean_dir = (
-                clean_path.parent.parent
-                if clean_path.parent.name == "clean"
-                else clean_path.parent
-            )
-            noisy_path = clean_dir / "noisy" / f"{tile_id}.pt"
-
-            if noisy_path.exists():
-                noisy_mapping[clean_path] = noisy_path
-            else:
-                logger.debug(f"No noisy .pt file found for {tile_id}")
-
-        if not clean_files:
+        if not long_files:
             raise FileNotFoundError(
                 f"No valid .pt files found for split '{self.split}'"
             )
 
         logger.info(
-            f"✓ Loaded {len(clean_files)} CLEAN .pt tiles (float32) for '{self.split}' split"
+            f"✓ Loaded {len(long_files)} LONG-EXPOSURE .pt tiles (float32) for '{self.split}' split"
         )
-        logger.info(f"  └─ Noisy pairs available: {len(noisy_mapping)} tiles")
-        return clean_files, noisy_mapping
+        return long_files
 
     def _create_split(self) -> List[Path]:
         """Use only the files designated for the current split in metadata JSON.
@@ -273,6 +247,74 @@ class EDMPTDataset:
         )
         return split_files
 
+    def _validate_training_data_purity(self):
+        """
+        ASSERT that training set contains ONLY long-exposure (clean) images.
+
+        This is critical for the physics-informed approach:
+        - Training learns P(x_clean) unconditionally
+        - Short-exposure (noisy) images are for inference/validation only
+
+        Raises:
+            AssertionError: If contaminated training data is detected
+        """
+        if self.split != "train":
+            # Only validate training split
+            return
+
+        # Load metadata to cross-check data_type field
+        try:
+            with open(self.metadata_json, "r") as f:
+                metadata = json.load(f)
+        except Exception as e:
+            logger.warning(f"Could not load metadata for validation: {e}")
+            return
+
+        tiles = metadata.get("tiles", [])
+        tiles_by_id = {tile.get("tile_id"): tile for tile in tiles}
+
+        # Sample check first min(20, len(split_files)) files
+        num_to_check = min(20, len(self.split_files))
+        contaminated_files = []
+
+        for file_path in self.split_files[:num_to_check]:
+            tile_id = Path(file_path).stem
+            matching_tile = tiles_by_id.get(tile_id)
+
+            if matching_tile:
+                data_type = matching_tile.get("data_type", "long")
+                is_clean = matching_tile.get("is_clean", True)
+
+                # Check via explicit fields or fallback
+                is_short = (data_type == "short") or (not is_clean)
+
+                if is_short:
+                    contaminated_files.append((tile_id, data_type, is_clean))
+
+        if contaminated_files:
+            error_msg = (
+                f"\n❌ CRITICAL: CONTAMINATED TRAINING DATA DETECTED!\n"
+                f"   Training MUST use only LONG-exposure (clean) images.\n"
+                f"   Found SHORT-exposure tiles in training set:\n"
+            )
+            for tile_id, data_type, is_clean in contaminated_files:
+                error_msg += (
+                    f"      - {tile_id}: data_type={data_type}, is_clean={is_clean}\n"
+                )
+            error_msg += (
+                f"\n   This violates the core assumption:\n"
+                f"   P(x_clean | y_noisy) = P(x_clean) * P(y_noisy | x_clean)\n"
+                f"   Training must learn P(x_clean) on clean images only!\n"
+            )
+            raise AssertionError(error_msg)
+
+        logger.info(
+            f"✅ Training data purity validated: {len(self.split_files)} LONG-exposure (clean) images"
+        )
+        logger.info(
+            f"   Sample validation: checked first {num_to_check} files - all clean ✓"
+        )
+
     def _load_raw_image(self, raw_idx):
         """
         Load raw image in EDM format (float32, CHW).
@@ -281,13 +323,11 @@ class EDMPTDataset:
             numpy.ndarray: Image in (C, H, W) format, float32, [-1, 1] range
         """
         pt_item = self._load_pt_item(raw_idx)
-        clean_image = pt_item["clean"]
+        long_image = pt_item["long"]
 
         # Convert to numpy
         image_np = (
-            clean_image.numpy()
-            if isinstance(clean_image, torch.Tensor)
-            else clean_image
+            long_image.numpy() if isinstance(long_image, torch.Tensor) else long_image
         )
 
         # Ensure float32 dtype
@@ -315,25 +355,25 @@ class EDMPTDataset:
 
         Returns:
             dict with keys:
-                - 'clean': torch.Tensor of shape (C, H, W), float32, [-1, 1] range
+                - 'long': torch.Tensor of shape (C, H, W), float32, [-1, 1] range
                 - 'metadata': dict with file information
         """
         try:
-            clean_path = self.split_files[idx]
+            long_path = self.split_files[idx]
 
             # Load .pt file directly as float32 (already in [-1,1] range)
-            clean = self._load_pt_image_direct(clean_path)
+            long_image = self._load_pt_image_direct(long_path)
 
             # Extract metadata
             metadata = {
-                "clean_path": str(clean_path),
-                "filename": clean_path.name,
+                "long_path": str(long_path),
+                "filename": long_path.name,
                 "image_size": self.image_size,
                 "channels": self.channels,
             }
 
             return {
-                "clean": clean,
+                "long": long_image,
                 "metadata": metadata,
             }
 
@@ -341,7 +381,7 @@ class EDMPTDataset:
             logger.warning(f"Error loading .pt file {idx}: {e}")
             # Return dummy data to prevent training crashes
             return {
-                "clean": torch.zeros(
+                "long": torch.zeros(
                     self.channels, self.image_size, self.image_size, dtype=torch.float32
                 ),
                 "metadata": {"corrupted": True, "original_idx": idx},
@@ -409,37 +449,19 @@ class EDMPTDataset:
 
     def __getitem__(self, idx):
         """
-        Get item as image for EDM compatibility.
+        Get item as (image, label) tuple for EDM compatibility.
 
         Returns:
-            numpy.ndarray: Image data in (C, H, W) format, float32, [-1, 1] range
+            tuple: (image, label) where:
+                - image: numpy.ndarray in (C, H, W) format, float32, [-1, 1] range
+                - label: numpy.ndarray label (empty array for unconditional training)
         """
         raw_idx = self._raw_idx[idx]
 
-        # Check cache first
-        image = self._cached_images.get(raw_idx, None)
-        if image is None:
-            image = self._load_raw_image(raw_idx)
-            if self._cache:
-                self._cached_images[raw_idx] = image
+        # Load image
+        image = self._load_raw_image(raw_idx)
 
-        # Apply horizontal flip if needed
-        if self._xflip[idx]:
-            assert isinstance(image, np.ndarray)
-            assert image.ndim == 3  # CHW
-            image = image[:, :, ::-1]
-
-        return image.copy()
-
-    @property
-    def name(self):
-        """Dataset name."""
-        return self._name
-
-    @property
-    def image_shape(self):
-        """Image shape in CHW format."""
-        return list(self._raw_shape[1:])
+        return image.copy(), self.get_label(idx)
 
     @property
     def resolution(self):
@@ -451,74 +473,28 @@ class EDMPTDataset:
         """Number of image channels."""
         return self._raw_shape[1]
 
-    def get_calibration_params(self, idx):
-        """Get calibration parameters for a specific index (legacy method)."""
-        return {}  # No longer using calibration parameters
+    def _get_raw_labels(self):
+        """Return raw labels array. For unconditional training, returns empty array."""
+        if self._raw_labels is None:
+            if self._use_labels:
+                # Future: Load actual labels if needed for conditional training
+                raise NotImplementedError(
+                    "Label loading not yet implemented. Use use_labels=False for unconditional training."
+                )
+            else:
+                # Unconditional: return empty labels array
+                self._raw_labels = np.zeros(
+                    [len(self.split_files), 0], dtype=np.float32
+                )
+        return self._raw_labels
 
-    def close(self):
-        """Clean up resources."""
-        pass
+    def get_label(self, idx):
+        """Return label for index idx. For unconditional training, returns empty array."""
+        raw_idx = self._raw_idx[idx]
+        label = self._get_raw_labels()[raw_idx]
+        return label.copy()
 
-
-def create_edm_pt_datasets(
-    data_root: Union[str, Path],
-    metadata_json: Union[str, Path],
-    train_split: str = "train",
-    val_split: str = "validation",
-    max_files: Optional[int] = None,
-    seed: int = 42,
-    image_size: int = 256,
-    channels: int = 3,
-) -> Tuple[EDMPTDataset, EDMPTDataset]:
-    """
-    Create EDM-compatible training and validation datasets from .pt files.
-
-    Args:
-        data_root: Root directory containing .pt files
-        metadata_json: Metadata JSON file with predefined splits
-        train_split: Training split name
-        val_split: Validation split name
-        max_files: Maximum files per split (None for all)
-        seed: Random seed
-        image_size: Target image size
-        channels: Number of channels (1 for grayscale, 3 for RGB)
-
-    Returns:
-        Tuple of (train_dataset, val_dataset) compatible with EDM's native interface
-    """
-    logger.info(f"Creating EDM-compatible PT datasets")
-    logger.info(f"Data root: {data_root}")
-    logger.info(f"Image size: {image_size}x{image_size}")
-    logger.info(f"Channels: {channels}")
-    logger.info(f"Data range: [-1, 1] (pre-normalized)")
-
-    # Create training dataset
-    train_dataset = EDMPTDataset(
-        data_root=data_root,
-        metadata_json=metadata_json,
-        split=train_split,
-        max_files=max_files,
-        seed=seed,
-        image_size=image_size,
-        channels=channels,
-    )
-
-    # Create validation dataset
-    val_max_files = max_files // 5 if max_files else None  # Use 20% for validation
-    val_dataset = EDMPTDataset(
-        data_root=data_root,
-        metadata_json=metadata_json,
-        split=val_split,
-        max_files=val_max_files,
-        seed=seed + 1,
-        image_size=image_size,
-        channels=channels,
-    )
-
-    logger.info(f"✅ Created EDM-compatible PT datasets (float32, no quantization):")
-    logger.info(f"  Training: {len(train_dataset)} samples")
-    logger.info(f"  Validation: {len(val_dataset)} samples")
-    logger.info(f"  Resolution: {train_dataset.resolution}x{train_dataset.resolution}")
-    logger.info(f"  Channels: {train_dataset.num_channels}")
-
-    return train_dataset, val_dataset
+    @property
+    def label_dim(self):
+        """Label dimension. 0 for unconditional training."""
+        return self._label_dim

@@ -133,7 +133,11 @@ def load_sid_split_files(sid_data_path: str) -> Dict[str, Dict[str, Any]]:
     file_info = {}
 
     # Load ALL files from split files
-    split_names = ["train", "validation", "test"]
+    split_names = [
+        "train",
+        "val",
+        "test",
+    ]  # Changed "validation" to "val" to match actual filenames
     split_files_data = {}  # Store all file entries from split files
 
     for camera_type, config in CAMERA_CONFIGS.items():
@@ -173,7 +177,14 @@ def load_sid_split_files(sid_data_path: str) -> Dict[str, Dict[str, Any]]:
                             exposure_time = filename_parts[2]
 
                             # Store in split_files_data
-                            key = (camera_type, scene_id, file_type, exposure_time)
+                            # Use full file path as part of key to ensure uniqueness
+                            key = (
+                                camera_type,
+                                scene_id,
+                                file_type,
+                                exposure_time,
+                                file_path,
+                            )
                             split_files_data[key] = {
                                 "file_path": file_path,
                                 "split": split_name,
@@ -196,6 +207,7 @@ def load_sid_split_files(sid_data_path: str) -> Dict[str, Dict[str, Any]]:
         scene_id,
         file_type,
         exposure_time,
+        file_path,
     ), file_data in split_files_data.items():
         if camera_type not in scene_groups:
             scene_groups[camera_type] = {}
@@ -490,7 +502,19 @@ def pack_raw_fuji(raw_image_data: np.ndarray, max_value: float) -> np.ndarray:
     Raises:
         ValueError: If input validation fails
     """
-    H, W = _validate_raw_input(raw_image_data, max_value, "Fuji", 6)
+    # Validate input but allow cropping for Fuji
+    if raw_image_data is None:
+        raise InvalidRawDataError("raw_image_data cannot be None")
+    if raw_image_data.size == 0:
+        raise InvalidRawDataError("raw_image_data cannot be empty")
+    if len(raw_image_data.shape) != 2:
+        raise InvalidRawDataError(
+            f"Expected 2D array (H, W), got shape {raw_image_data.shape}"
+        )
+    if max_value <= 0:
+        raise InvalidRawDataError(f"max_value must be positive (got {max_value})")
+
+    H, W = raw_image_data.shape
 
     # Convert to float32 and subtract black level
     im = raw_image_data.astype(np.float32)
@@ -500,9 +524,10 @@ def pack_raw_fuji(raw_image_data: np.ndarray, max_value: float) -> np.ndarray:
         white_level - black_level
     )  # subtract the black level
 
-    # Ensure dimensions are divisible by 6
+    # Crop to ensure dimensions are divisible by 6 (required for X-Trans pattern)
     H = (H // 6) * 6
     W = (W // 6) * 6
+    im = im[:H, :W]
 
     out = np.zeros((H // 3, W // 3, 9))
 

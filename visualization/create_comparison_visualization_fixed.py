@@ -6,155 +6,29 @@ Properly separates single-domain vs cross-domain results.
 """
 
 import json
+import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+# Add utils to path
+sys.path.insert(0, str(Path(__file__).parent))
+sys.path.append("/home/jilab/Jae/preprocessing")
 
-def load_image_tensor(image_path, domain=None):
-    """Load a .pt file and return as numpy array, denormalizing from [-1,1] if needed."""
-    if not image_path.exists():
-        return None, False
+from utils import (
+    extract_metrics_from_json,
+    extract_pixel_range,
+    format_pixel_range,
+    get_method_filename_map,
+)
+from utils import load_image_tensor as load_image_tensor_util
 
-    try:
-        tensor = torch.load(image_path)
-        # Convert to numpy and squeeze singleton dimensions
-        array = tensor.numpy()
-        is_rgb = False
+from preprocessing.utils import get_pixel_stats
 
-        # Handle different tensor shapes
-        if len(array.shape) == 4:  # (1, 1, 256, 256) or (1, 3, 256, 256)
-            if array.shape[1] == 3:  # RGB
-                array = array[0]  # Remove batch dimension, keep (3, 256, 256)
-                is_rgb = True
-            else:
-                array = array[0, 0]  # Remove batch and channel dimensions
-        elif len(array.shape) == 3:
-            if array.shape[0] == 1:  # (1, 256, 256)
-                array = array[0]  # Remove channel dimension
-            elif array.shape[0] == 3:  # (3, 256, 256) - RGB image
-                # Keep RGB for photography, convert to grayscale for others
-                if "photography" in domain:
-                    is_rgb = True
-                    # array stays as (3, 256, 256)
-                else:
-                    array = array.mean(axis=0)  # Convert to grayscale
-            else:  # (256, 256, 1) or similar
-                array = array.squeeze()
-        elif len(array.shape) == 2:  # (256, 256)
-            pass  # Already correct shape
-        else:
-            print(f"Unexpected array shape: {array.shape} for {image_path}")
-            return None, False
-
-        # Check if image is in [-1,1] range and denormalize if needed
-        array = denormalize_from_model_space(array, domain)
-
-        return array, is_rgb
-    except Exception as e:
-        print(f"Error loading {image_path}: {e}")
-        return None, False
-
-
-def get_domain_ranges():
-    """Get the domain-specific normalization ranges from preprocessing."""
-    # These are the ranges defined in process_tiles_pipeline.py line 94-98
-    return {
-        "astronomy": {"min": -65.00, "max": 385.00},
-        "microscopy": {"min": 0.00, "max": 65535.00},
-        "photography": {"min": 0.00, "max": 15871.00},
-    }
-
-
-def denormalize_from_model_space(image, domain):
-    """
-    Denormalize image from [-1,1] model space to domain-specific physical units.
-
-    This follows the same logic as sample_noisy_pt_lle_PGguidance.py denormalize_to_physical:
-    1. [-1,1] → [0,1]: (image + 1.0) / 2.0
-    2. [0,1] → [domain_min, domain_max]: tensor_norm * (domain_max - domain_min) + domain_min
-
-    Args:
-        image: numpy array potentially in [-1,1] range
-        domain: domain name for range lookup
-
-    Returns:
-        numpy array in domain-specific physical units
-    """
-    if image is None:
-        return None
-
-    # Get domain-specific range
-    domain_ranges = get_domain_ranges()
-
-    # Map photography_sony and photography_fuji to photography
-    domain_key = domain
-    if "photography" in domain:
-        domain_key = "photography"
-
-    if domain_key not in domain_ranges:
-        print(f"Warning: Unknown domain {domain}, returning image as-is")
-        return image
-
-    domain_range = domain_ranges[domain_key]
-    domain_min = domain_range["min"]
-    domain_max = domain_range["max"]
-
-    # Check if image is in [-1,1] range (allowing some tolerance)
-    img_min = float(np.min(image))
-    img_max = float(np.max(image))
-
-    # Check if values are in [-1,1] range (±0.1 tolerance)
-    is_normalized = img_min >= -1.1 and img_max <= 1.1
-
-    if is_normalized:
-        # Denormalize from [-1,1] to domain range
-        # Step 1: [-1,1] → [0,1]
-        image_norm = (image + 1.0) / 2.0
-        image_norm = np.clip(image_norm, 0, 1)
-
-        # Step 2: [0,1] → [domain_min, domain_max]
-        image_phys = image_norm * (domain_max - domain_min) + domain_min
-
-        return image_phys
-    else:
-        # Image is already in physical units
-        return image
-
-
-def convert_brightness_to_domain_range(image, domain):
-    """
-    Convert brightness-scaled images to original domain pixel ranges.
-
-    The stored .pt files are in brightness space [0, s] where s = domain_max - domain_min.
-    To get back to original domain range, we just add domain_min.
-
-    - Astronomy: [0, 450] + (-65) → [-65, 385]
-    - Microscopy: [0, 65535] + 0 → [0, 65535]
-    - Photography: [0, 15871] + 0 → [0, 15871]
-    """
-    if image is None:
-        return None
-
-    # Get domain-specific range
-    domain_ranges = get_domain_ranges()
-
-    # Map photography_sony and photography_fuji to photography
-    domain_key = domain
-    if "photography" in domain:
-        domain_key = "photography"
-
-    if domain_key not in domain_ranges:
-        print(f"Warning: Unknown domain {domain}, returning image as-is")
-        return image
-
-    domain_range = domain_ranges[domain_key]
-    domain_min = domain_range["min"]
-
-    # Simple shift: brightness [0, s] + domain_min → [domain_min, domain_max]
-    return image + domain_min
+# Import preprocessing utilities for consistent RGB handling
+from preprocessing.visualizations import prepare_for_tile_visualization
 
 
 def find_cross_domain_example(domain, single_domain_example):
@@ -213,6 +87,7 @@ def get_s_parameter(source_path):
 def get_image_for_method(domain, example_dir, method):
     """Get image tensor for a specific method from the appropriate source."""
     tile_path = Path(example_dir)
+    method_files = get_method_filename_map()
 
     # Determine the correct source directory based on method type
     if "cross" in method:
@@ -281,64 +156,15 @@ def get_image_for_method(domain, example_dir, method):
         else:
             return None
 
-    # Map method names to filenames
-    method_to_original_filename = {
-        "noisy": "noisy.pt",
-        "clean": "clean.pt",
-        "exposure_scaled": "restored_exposure_scaled.pt",
-        "gaussian_x0": "restored_gaussian_x0.pt",
-        "pg_x0_single": "restored_pg_x0.pt",
-        "gaussian_x0_cross": "restored_gaussian_x0_cross.pt",
-        "pg_x0_cross": "restored_pg_x0_cross.pt",
-    }
-
-    if method in method_to_original_filename:
-        original_image_path = source_path / method_to_original_filename[method]
-        image, is_rgb = load_image_tensor(original_image_path, domain=domain)
-
-        # Image is now in domain-specific physical units (already denormalized in load_image_tensor)
+    if method in method_files:
+        original_image_path = source_path / method_files[method]
+        image, is_rgb = load_image_tensor_util(original_image_path)
         return image, is_rgb
 
     return None, False
 
 
-def extract_pixel_range(domain, tile_path):
-    """Extract pixel range from results.json."""
-    results_file = tile_path / "results.json"
-    if not results_file.exists():
-        return None
-
-    try:
-        with open(results_file, "r") as f:
-            data = json.load(f)
-
-        brightness = data.get("brightness_analysis", {})
-        return {
-            "min": brightness.get("min", 0),
-            "max": brightness.get("max", 1),
-            "mean": brightness.get("mean", 0),
-            "std": brightness.get("std", 0),
-        }
-    except:
-        return None
-
-
-def format_pixel_range(pixel_range):
-    """Format pixel range for display."""
-    return f"[{pixel_range['min']:.0f}, {pixel_range['max']:.0f}]"
-
-
-def format_metrics(metrics_dict, methods_to_show):
-    """Format metrics string for display."""
-    lines = []
-    for method in methods_to_show:
-        if method in metrics_dict:
-            m = metrics_dict[method]
-            line = f"{method.replace('_', '-').replace('x0', 'x0')}: "
-            line += f"PSNR={m.get('psnr', 0):.1f}, SSIM={m.get('ssim', 0):.3f}, "
-            line += f"LPIPS={m.get('lpips', 0):.3f}, NIQE={m.get('niqe', 'N/A')}"
-            lines.append(line)
-    return "\n".join(lines)
+# Use shared utilities for pixel range and metrics formatting
 
 
 def normalize_image_to_domain_range(image, domain_range):
@@ -433,8 +259,11 @@ def create_domain_subplot(
     for i, img in enumerate(images):
         # Handle grayscale or RGB
         if len(img.shape) == 3 and img.shape[0] == 3:  # RGB (3, 256, 256)
-            # Convert CHW to HWC for display
-            img_display = np.transpose(img, (1, 2, 0))
+            # Use preprocessing utility to convert CHW to HWC for display
+            img_display = prepare_for_tile_visualization(img)
+            if img_display is None:
+                # Fallback to manual transpose
+                img_display = np.transpose(img, (1, 2, 0))
             # Normalize RGB to [0,1] for display
             img_display = (img_display - vmin) / (vmax - vmin + 1e-8)
             img_display = np.clip(img_display, 0, 1)
@@ -651,35 +480,8 @@ def extract_metrics(domain, example_dir, method):
         else:
             return None
 
-    results_file = source_path / "results.json"
-    if not results_file.exists():
-        return None
-
-    try:
-        with open(results_file, "r") as f:
-            data = json.load(f)
-
-        comprehensive_metrics = data.get("comprehensive_metrics", {})
-
-        # Map method names to the keys in the results
-        method_key_map = {
-            "noisy": "noisy",
-            "clean": "clean",
-            "exposure_scaled": "exposure_scaled",
-            "gaussian_x0": "gaussian_x0",
-            "pg_x0_single": "pg_x0",
-            "gaussian_x0_cross": "gaussian_x0_cross",
-            "pg_x0_cross": "pg_x0_cross",
-        }
-
-        if method in method_key_map:
-            key = method_key_map[method]
-            return comprehensive_metrics.get(key)
-
-    except Exception as e:
-        print(f"Error extracting metrics for {method}: {e}")
-
-    return None
+    # Use shared utility for extracting metrics
+    return extract_metrics_from_json(source_path / "results.json", method)
 
 
 def main():

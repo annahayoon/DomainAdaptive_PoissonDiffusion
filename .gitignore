@@ -155,21 +155,9 @@ dataset/
 docs/
 external/
 htmlcov/
-hpc_result/
-notebooks/
-old/
-refactored_evaluation_results/
 results/
-savio_shellscript/
-scripts/
-setup/
-sync/
-tests/
 
 # Data directories (usually large and not tracked)
-data/raw/
-data/processed/
-data/external/
 datasets/
 *.h5
 *.hdf5
@@ -275,33 +263,24 @@ run_edm_native_train.sh
 /*.txt
 
 # Temporary documentation files
-*_FIX*.md
-*_SUMMARY*.md
-*_STATUS.md
 *_INSTRUCTIONS.md
 *_EXPLANATION.md
 *_DECISION.md
 *_ANALYSIS.md
 *_ESTIMATE.md
 *_REVIEW.md
-DAPGD_Implementation.md
-physics_validation_summary.md
 plan.md
 corrected_phase*_assessment.md
 
 # Temporary test/debug scripts
-test_*.py
 fix_*.py
 add_*.py
 ddp_*.py
 *_workaround.py
-analyze_*.py
 update_*.py
 proper_*.py
 
 # Shell utility scripts (temporary)
-clear_*.sh
-monitor_*.sh
 pin_*.sh
 quick_*.sh
 restart_*.sh
@@ -313,16 +292,6 @@ sync_*.sh
 
 # Tags file
 tags
-
-# Test data directories
-data/domain_dataset_test/
-data/*_test/
-data/*_validation*/
-data/test_*/
-data/phase*/
-
-# Preprocessed data directories (usually large)
-data/preprocessed_*/
 
 # Anthropic directory (contains API keys and sensitive data)
 Anthropic/

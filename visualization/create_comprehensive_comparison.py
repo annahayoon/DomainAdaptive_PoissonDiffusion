@@ -5,6 +5,7 @@ Create comprehensive comparison visualization across all three domains
 """
 
 import json
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -13,16 +14,20 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+# Add utils to path
+sys.path.insert(0, str(Path(__file__).parent))
+sys.path.append("/home/jilab/Jae/preprocessing")
+
+from utils import load_tensor_from_pt, normalize_for_display
+
+# Import preprocessing utilities for consistent RGB handling
+from preprocessing.visualizations import prepare_for_tile_visualization
+
 
 def load_results_from_json(json_path: Path) -> Dict[str, Any]:
     """Load results from JSON file."""
     with open(json_path, "r") as f:
         return json.load(f)
-
-
-def load_tensor_from_pt(pt_path: Path) -> torch.Tensor:
-    """Load tensor from .pt file."""
-    return torch.load(pt_path, map_location="cpu")
 
 
 def denormalize_to_physical(tensor: torch.Tensor, domain: str) -> np.ndarray:
@@ -46,12 +51,8 @@ def denormalize_to_physical(tensor: torch.Tensor, domain: str) -> np.ndarray:
         return tensor.numpy()
 
 
-def normalize_for_display(
-    img: np.ndarray, percentile_range: Tuple[float, float] = (1, 99)
-) -> np.ndarray:
-    """Normalize image for display using percentile range."""
-    p_low, p_high = np.percentile(img, percentile_range)
-    return np.clip((img - p_low) / (p_high - p_low), 0, 1)
+# Use shared normalize_for_display utility
+from utils import normalize_for_display
 
 
 def create_comprehensive_comparison():
@@ -135,8 +136,14 @@ def create_comprehensive_comparison():
 
         # Plot clean reference
         ax_clean = fig.add_subplot(gs[i, 0])
-        if clean_display.ndim == 3 and clean_display.shape[0] == 3:  # RGB
-            ax_clean.imshow(clean_display.transpose(1, 2, 0))
+        if clean_display.ndim == 3 and clean_display.shape[0] == 3:  # RGB (C, H, W)
+            # Use preprocessing utility to convert CHW to HWC for display
+            clean_rgb = prepare_for_tile_visualization(clean_display)
+            if clean_rgb is not None:
+                ax_clean.imshow(clean_rgb)
+            else:
+                # Fallback to manual transpose
+                ax_clean.imshow(clean_display.transpose(1, 2, 0))
         else:  # Grayscale
             ax_clean.imshow(clean_display, cmap="gray")
         ax_clean.set_title(
@@ -153,8 +160,16 @@ def create_comprehensive_comparison():
             single_phys = denormalize_to_physical(single_img, domain)
             single_display = normalize_for_display(single_phys)
 
-            if single_display.ndim == 3 and single_display.shape[0] == 3:  # RGB
-                ax.imshow(single_display.transpose(1, 2, 0))
+            if (
+                single_display.ndim == 3 and single_display.shape[0] == 3
+            ):  # RGB (C, H, W)
+                # Use preprocessing utility to convert CHW to HWC for display
+                single_rgb = prepare_for_tile_visualization(single_display)
+                if single_rgb is not None:
+                    ax.imshow(single_rgb)
+                else:
+                    # Fallback to manual transpose
+                    ax.imshow(single_display.transpose(1, 2, 0))
             else:  # Grayscale
                 ax.imshow(single_display, cmap="gray")
 
@@ -179,8 +194,14 @@ def create_comprehensive_comparison():
             cross_phys = denormalize_to_physical(cross_img, domain)
             cross_display = normalize_for_display(cross_phys)
 
-            if cross_display.ndim == 3 and cross_display.shape[0] == 3:  # RGB
-                ax.imshow(cross_display.transpose(1, 2, 0))
+            if cross_display.ndim == 3 and cross_display.shape[0] == 3:  # RGB (C, H, W)
+                # Use preprocessing utility to convert CHW to HWC for display
+                cross_rgb = prepare_for_tile_visualization(cross_display)
+                if cross_rgb is not None:
+                    ax.imshow(cross_rgb)
+                else:
+                    # Fallback to manual transpose
+                    ax.imshow(cross_display.transpose(1, 2, 0))
             else:  # Grayscale
                 ax.imshow(cross_display, cmap="gray")
 
