@@ -191,7 +191,11 @@ class EDMPosteriorSampler:
         )
 
         if x_init is None:
-            x_init = y_observed.clone().to(torch.float64).to(self.device)
+            x_init = (
+                apply_exposure_scaling(y_observed, exposure_ratio)
+                .to(torch.float64)
+                .to(self.device)
+            )
         else:
             x_init = x_init.to(torch.float64).to(self.device)
         x = x_init
