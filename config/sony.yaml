@@ -4,7 +4,7 @@
 # Training hyperparameters
 batch_size: 4
 learning_rate: 0.0001
-total_kimg: 200  # ~0.6 epochs over 34,776 training tiles (161 long images × 216 tiles)
+total_kimg: 400  # ~1.2 epochs over 139,104 training tiles (544 long images × 256 tiles)
 
 # EMA configuration
 ema_halflife_kimg: 50
@@ -31,6 +31,6 @@ seed: 42
 
 # Dataset configuration
 data_root: dataset/processed
-metadata_json: dataset/processed/metadata_photography_incremental.json
+metadata_json: dataset/processed/metadata_sony_incremental.json
 # Note: Currently trains on all sensors. To filter by sensor type, create separate metadata files
 # sensor_types: [sony]  # NOT CURRENTLY SUPPORTED - requires metadata filtering or dataset modifications

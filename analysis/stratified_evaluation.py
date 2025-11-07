@@ -1,16 +1,4 @@
-"""
-Stratified evaluation module for analyzing results by signal level.
-
-This is THE CORE of the paper's contribution:
-- Compute metrics stratified by ground truth ADC level
-- Show that heteroscedastic guidance provides largest gains at low signal levels
-- Validate statistical significance with Holm-corrected t-tests
-
-Paper's central claim: "Expected: [TBD] dB PSNR gains in very low-light regions
-(ADC < 100) where heteroscedastic weighting matters most."
-
-This module makes that claim quantitative and testable.
-"""
+"""Stratified evaluation module for analyzing results by signal level."""
 
 import json
 import logging
@@ -26,89 +14,43 @@ logger = logging.getLogger(__name__)
 
 
 class StratifiedEvaluator:
-    """
-    Compute metrics stratified by ground truth signal level.
+    """Compute metrics stratified by ground truth signal level."""
 
-    This answers the key research question:
-    "Are improvements largest where signal-dependent noise dominates?"
-    """
-
-    def __init__(self, domain_ranges: Dict[str, float]):
-        """
-        Initialize stratified evaluator.
+    def __init__(self, sensor_ranges: Dict[str, float]):
+        """Initialize stratified evaluator.
 
         Args:
-            domain_ranges: Dict with 'min' (black level ADU) and 'max' (white level ADU)
-                          e.g., {'min': 512, 'max': 16383} for Sony a7S II
+            sensor_ranges: Dict with 'min' (black level ADU) and 'max' (white level ADU)
         """
-        self.domain_ranges = domain_ranges
+        self.sensor_ranges = sensor_ranges
 
-        # Define ADC bins from paper proposal
-        # These correspond to different noise regimes
         self.adc_bins = {
-            "very_low": (0, 100),  # Extreme low-light: dominated by shot noise
-            "low": (100, 500),  # Low-light: shot noise significant
-            "medium": (500, 2000),  # Moderate: transition region
-            "high": (2000, float("inf")),  # Well-lit: shot noise negligible
+            "very_low": (0, 100),
+            "low": (100, 500),
+            "medium": (500, 2000),
+            "high": (2000, float("inf")),
         }
 
-        logger.info(f"StratifiedEvaluator initialized with ADC bins:")
-        for name, (min_adc, max_adc) in self.adc_bins.items():
-            logger.info(f"  {name:12s}: [{min_adc:5.0f}, {max_adc:5.0f})")
-
     def denormalize_to_adc(self, tensor: torch.Tensor) -> torch.Tensor:
-        """
-        Convert model space [-1, 1] to physical ADC units.
-
-        The model is trained on [-1, 1] normalized data.
-        To stratify by signal level, we convert to actual ADC values
-        from the preprocessing pipeline.
-
-        Args:
-            tensor: Tensor in [-1, 1] range
-
-        Returns:
-            Tensor in ADC units (physical sensor values)
-        """
+        """Convert model space [-1, 1] to physical ADC units."""
         # [-1, 1] → [0, 1]
         tensor_01 = (tensor + 1.0) / 2.0
 
         # [0, 1] → [black_level, white_level]
-        adc_range = self.domain_ranges["max"] - self.domain_ranges["min"]
-        adc = tensor_01 * adc_range + self.domain_ranges["min"]
+        adc_range = self.sensor_ranges["max"] - self.sensor_ranges["min"]
+        adc = tensor_01 * adc_range + self.sensor_ranges["min"]
 
         return adc
 
     def compute_stratified_metrics(
         self, clean: torch.Tensor, enhanced: torch.Tensor, method_name: str
     ) -> Dict[str, Dict[str, float]]:
-        """
-        Compute PSNR stratified by clean image ADC level.
-
-        This is THE KEY EXPERIMENT: Does heteroscedastic guidance help more
-        in dark regions (low ADC) than bright regions (high ADC)?
-
-        Args:
-            clean: Ground truth image, shape (C, H, W), range [-1, 1]
-            enhanced: Enhanced/reconstructed image, same shape and range
-            method_name: Name of method (for logging)
-
-        Returns:
-            Dict mapping bin name → metrics dict with:
-                - psnr: Peak signal-to-noise ratio in this bin
-                - mean_abs_error: Mean absolute pixel difference
-                - pixel_count: Number of pixels in this bin
-                - pixel_fraction: Fraction of image in this bin
-                - adc_range: String describing ADC range
-                - mean_signal: Average ADC in this bin
-        """
+        """Compute PSNR stratified by clean image ADC level."""
         # Convert to ADC for stratification
         clean_adc = self.denormalize_to_adc(clean)
 
         results = {}
         for bin_name, (min_adc, max_adc) in self.adc_bins.items():
-            # Create spatial mask for pixels in this ADC range
-            # Use mean across channels for multi-channel images
             if clean_adc.dim() == 3:
                 clean_adc_mono = clean_adc.mean(dim=0)  # Average channels
             else:
@@ -117,7 +59,6 @@ class StratifiedEvaluator:
             mask = (clean_adc_mono >= min_adc) & (clean_adc_mono < max_adc)
 
             if not mask.any():
-                # No pixels in this range
                 results[bin_name] = {
                     "psnr": float("nan"),
                     "mean_abs_error": float("nan"),
@@ -128,7 +69,6 @@ class StratifiedEvaluator:
                 }
                 continue
 
-            # Extract pixels in this range from ALL channels
             if clean.dim() == 3:
                 # (C, H, W) → broadcast mask to channels
                 mask_expanded = mask.unsqueeze(0).expand(clean.shape[0], -1, -1)
@@ -138,18 +78,14 @@ class StratifiedEvaluator:
                 clean_masked = clean[mask]
                 enhanced_masked = enhanced[mask]
 
-            # Compute MSE and PSNR for this subset
             mse = ((clean_masked - enhanced_masked) ** 2).mean()
 
-            # Avoid log(0)
             if mse < 1e-10:
                 psnr = float("inf")
             else:
-                # PSNR for range [-1, 1]: max_val = 2
                 psnr = 20 * torch.log10(torch.tensor(2.0)) - 10 * torch.log10(mse)
                 psnr = psnr.item()
 
-            # Mean absolute error as secondary metric
             mae = (clean_masked - enhanced_masked).abs().mean()
 
             results[bin_name] = {
@@ -166,21 +102,9 @@ class StratifiedEvaluator:
     def compare_methods_stratified(
         self, clean: torch.Tensor, method_results: Dict[str, torch.Tensor]
     ) -> Dict[str, Dict[str, Dict[str, float]]]:
-        """
-        Compare multiple methods with stratification.
-
-        This generates data for your paper's comparison table.
-
-        Args:
-            clean: Ground truth image
-            method_results: Dict mapping method_name → enhanced_image
-
-        Returns:
-            Nested dict: {method: {bin: {metric: value}}}
-        """
+        """Compare multiple methods with stratification."""
         comparison = {}
         for method_name, enhanced in method_results.items():
-            logger.debug(f"Computing stratified metrics for {method_name}")
             comparison[method_name] = self.compute_stratified_metrics(
                 clean, enhanced, method_name
             )
@@ -191,18 +115,7 @@ class StratifiedEvaluator:
         baseline_metrics: Dict[str, Dict[str, float]],
         proposed_metrics: Dict[str, Dict[str, float]],
     ) -> Dict[str, float]:
-        """
-        Compute PSNR gain for each bin.
-
-        This creates the comparison matrix for your paper's Table 1!
-
-        Args:
-            baseline_metrics: Metrics from baseline method
-            proposed_metrics: Metrics from your heteroscedastic method
-
-        Returns:
-            Dict mapping bin_name → PSNR improvement (dB)
-        """
+        """Compute PSNR gain for each bin."""
         improvements = {}
         for bin_name in self.adc_bins.keys():
             if bin_name not in baseline_metrics or bin_name not in proposed_metrics:
@@ -225,35 +138,30 @@ class StratifiedEvaluator:
         baseline_method: str,
         proposed_method: str,
         alpha: float = 0.05,
-    ) -> Dict[str, Dict[str, float]]:
-        """
-        Test if improvements are statistically significant.
+        return_per_scene_improvements: bool = False,
+    ) -> Dict:
+        """Test if improvements are statistically significant.
 
         Uses paired t-test with Holm-Bonferroni correction for multiple comparisons.
-        This generates p-values for your paper's statistical claims.
 
         Args:
-            all_results: List of per-tile results with stratified metrics
-            baseline_method: Name of baseline method (e.g., 'gaussian_x0')
-            proposed_method: Name of proposed method (e.g., 'pg_x0')
-            alpha: Significance level (default 0.05)
+            all_results: List of result dictionaries with "stratified_metrics" key
+            baseline_method: Name of baseline method
+            proposed_method: Name of proposed method
+            alpha: Significance level (default: 0.05)
+            return_per_scene_improvements: If True, also return per-scene improvements
 
         Returns:
-            Dict mapping bin_name → {
-                'mean_improvement': float,
-                'std_improvement': float,
-                't_statistic': float,
-                'p_value': float,
-                'p_value_corrected': float (Holm-corrected),
-                'significant': bool,
-                'n_samples': int
-            }
+            Dict with "statistical_significance" key containing test results.
+            If return_per_scene_improvements=True, also includes "comparison_by_scene" key.
         """
-        # Collect per-bin metrics across all tiles
         bin_data = {
             bin_name: {"baseline": [], "proposed": []}
             for bin_name in self.adc_bins.keys()
         }
+
+        # Also collect per-scene improvements if requested
+        per_scene_improvements = [] if return_per_scene_improvements else None
 
         for result in all_results:
             if "stratified_metrics" not in result:
@@ -264,6 +172,7 @@ class StratifiedEvaluator:
             if baseline_method not in stratified or proposed_method not in stratified:
                 continue
 
+            scene_improvements = {} if return_per_scene_improvements else None
             for bin_name in self.adc_bins.keys():
                 baseline_entry = stratified[baseline_method].get(bin_name, {})
                 proposed_entry = stratified[proposed_method].get(bin_name, {})
@@ -274,8 +183,17 @@ class StratifiedEvaluator:
                 if not (np.isnan(baseline_psnr) or np.isnan(proposed_psnr)):
                     bin_data[bin_name]["baseline"].append(baseline_psnr)
                     bin_data[bin_name]["proposed"].append(proposed_psnr)
+                    if return_per_scene_improvements:
+                        scene_improvements[bin_name] = proposed_psnr - baseline_psnr
 
-        # Perform paired t-tests
+            if return_per_scene_improvements and scene_improvements:
+                per_scene_improvements.append(
+                    {
+                        "scene_id": result.get("scene_id", "unknown"),
+                        "improvements": scene_improvements,
+                    }
+                )
+
         test_results = {}
         p_values = []
         bin_names_for_correction = []
@@ -298,8 +216,6 @@ class StratifiedEvaluator:
             baseline = np.array(data["baseline"])
             proposed = np.array(data["proposed"])
 
-            # Paired t-test: H0 = no difference
-            # H1 = proposed > baseline (one-tailed)
             t_stat, p_value_two_tailed = ttest_rel(proposed, baseline)
             p_value = (
                 p_value_two_tailed / 2 if t_stat > 0 else 1 - p_value_two_tailed / 2
@@ -312,15 +228,14 @@ class StratifiedEvaluator:
                 "std_improvement": float(np.std(improvements)),
                 "t_statistic": float(t_stat),
                 "p_value": float(p_value),
-                "p_value_corrected": float("nan"),  # Will update after Holm correction
-                "significant": False,  # Will update after correction
+                "p_value_corrected": float("nan"),
+                "significant": False,
                 "n_samples": n_samples,
             }
 
             p_values.append(p_value)
             bin_names_for_correction.append(bin_name)
 
-        # Holm-Bonferroni correction for multiple comparisons
         if p_values:
             reject, p_corrected, _, _ = multipletests(
                 p_values, alpha=alpha, method="holm"
@@ -330,23 +245,34 @@ class StratifiedEvaluator:
                 test_results[bin_name]["p_value_corrected"] = float(p_corrected[i])
                 test_results[bin_name]["significant"] = bool(reject[i])
 
-        return test_results
+        result_dict = {"statistical_significance": test_results}
+        if return_per_scene_improvements:
+            result_dict["comparison_by_scene"] = per_scene_improvements
+        return result_dict
+
+
+def format_significance_marker(p_corrected: float) -> str:
+    """Format significance marker based on p-value."""
+    if np.isnan(p_corrected):
+        return ""
+    elif p_corrected < 0.001:
+        return "***"
+    elif p_corrected < 0.01:
+        return "**"
+    elif p_corrected < 0.05:
+        return "*"
+    else:
+        return ""
 
 
 def format_stratified_results_table(
     comparison: Dict[str, Dict[str, Dict[str, float]]], method_names: List[str] = None
 ) -> str:
-    """
-    Format stratified results as ASCII table for logging/reporting.
-
-    This is how your Table 1 will look!
-    """
+    """Format stratified results as ASCII table for logging/reporting."""
     if method_names is None:
         method_names = list(comparison.keys())
 
     bin_order = ["very_low", "low", "medium", "high"]
-
-    # Build table
     lines = []
     lines.append("=" * 100)
     lines.append(
@@ -380,21 +306,3 @@ def format_stratified_results_table(
 
     lines.append("=" * 100)
     return "\n".join(lines)
-
-
-if __name__ == "__main__":
-    # Example usage
-    evaluator = StratifiedEvaluator({"min": 512, "max": 16383})
-
-    # Example: Generate some synthetic data
-    clean = torch.rand(3, 256, 256) * 2 - 1  # [-1, 1]
-    enhanced = clean + torch.randn_like(clean) * 0.1
-
-    metrics = evaluator.compute_stratified_metrics(clean, enhanced, "test_method")
-
-    print("Example stratified metrics:")
-    for bin_name, metrics_dict in metrics.items():
-        print(
-            f"  {bin_name}: PSNR={metrics_dict['psnr']:.2f} dB, "
-            f"pixels={metrics_dict['pixel_fraction']:.1%}"
-        )

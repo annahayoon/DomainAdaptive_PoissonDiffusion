@@ -12,8 +12,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .error_handlers import NumericalStabilityManager
-from .exceptions import MetadataError, TransformError
+from .error_handlers import MetadataError, NumericalStabilityManager, TransformError
 from .logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -42,15 +41,11 @@ class ImageMetadata:
     black_level: float = 0.0
     white_level: float = 1.0
 
-    # Domain and acquisition
-    domain: str = "unknown"  # 'photography', 'microscopy', 'astronomy'
     bit_depth: int = 8
 
     # Optional acquisition parameters
     iso: Optional[int] = None
     exposure_time: Optional[float] = None
-    wavelength: Optional[float] = None  # nm for microscopy
-    telescope: Optional[str] = None  # for astronomy
 
     def to_json(self) -> str:
         """Serialize to JSON."""
@@ -150,18 +145,6 @@ class ImageMetadata:
         if self.bit_depth <= 0 or self.bit_depth > 32:
             errors.append("Bit depth must be between 1 and 32")
 
-        # Check domain
-        if self.domain not in [
-            "photography",
-            "microscopy",
-            "astronomy",
-            "unknown",
-            "test",
-        ]:
-            errors.append(
-                "Domain must be 'photography', 'microscopy', 'astronomy', 'unknown', or 'test'"
-            )
-
         if errors:
             error_msg = "Metadata validation failed: " + "; ".join(errors)
             logger.error(error_msg)
@@ -204,7 +187,6 @@ class ReversibleTransform:
         image: torch.Tensor,
         pixel_size: float = 1.0,
         pixel_unit: str = "pixel",
-        domain: str = "unknown",
         black_level: float = 0.0,
         white_level: float = 1.0,
         **extra_metadata,
@@ -216,7 +198,6 @@ class ReversibleTransform:
             image: Input image [B, C, H, W]
             pixel_size: Physical size per pixel
             pixel_unit: Unit of pixel_size
-            domain: Image domain
             black_level: Sensor black level
             white_level: Sensor white level
             **extra_metadata: Additional metadata to preserve
@@ -255,7 +236,6 @@ class ReversibleTransform:
             pad_amounts=None,
             pixel_size=pixel_size,
             pixel_unit=pixel_unit,
-            domain=domain,
             black_level=black_level,
             white_level=white_level,
             bit_depth=int(np.log2(max(white_level - black_level, 1)) + 1),

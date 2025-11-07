@@ -2,36 +2,625 @@
 Comprehensive evaluation metrics for Poisson-Gaussian diffusion restoration.
 
 This module implements:
-1. Physics-specific metrics (χ² consistency, residual whiteness, bias analysis)
-2. Domain-specific metrics (counting accuracy, photometry error)
-3. Baseline comparison utilities
-
-Note: Standard image quality metrics (PSNR, SSIM, LPIPS, NIQE) are now computed
-directly in the sampling script using torchmetrics and piq libraries.
+1. Standard image quality metrics (PSNR, SSIM, MSE, LPIPS, NIQE, FID)
+2. Physics-specific metrics (χ² consistency, residual whiteness, bias analysis)
+3. Sensor-specific metrics (resolution preservation)
+4. Baseline comparison utilities
 
 Requirements addressed: 6.3-6.6 from requirements.md
 """
 
+import argparse
 import json
 import logging
-import warnings
+import pickle
+import sys
+import time
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+import scipy.linalg
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+import tqdm
 from scipy import stats
 from scipy.signal import periodogram
 
-from .exceptions import AnalysisError
+from .error_handlers import AnalysisError
 
-# skimage metrics imports removed - now using torchmetrics and piq in sampling script
+# Try importing optional dependencies for standard image quality metrics
+try:
+    from torchmetrics.image import PeakSignalNoiseRatio as PSNR
+    from torchmetrics.image import StructuralSimilarityIndexMeasure as SSIM
+    from torchmetrics.regression import MeanSquaredError as MSE
 
+    TORCHMETRICS_AVAILABLE = True
+except ImportError as e:
+    TORCHMETRICS_AVAILABLE = False
+    PSNR = None
+    SSIM = None
+    MSE = None
+
+try:
+    import lpips
+
+    LPIPS_AVAILABLE = True
+except ImportError:
+    LPIPS_AVAILABLE = False
+    lpips = None
+
+try:
+    import pyiqa
+
+    PQIQA_AVAILABLE = True
+except ImportError:
+    PQIQA_AVAILABLE = False
+    pyiqa = None
+
+EDM_AVAILABLE = False
+_lpips_metric_cache = {}
 
 # Set up logging
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Standard Image Quality Metrics
+# ============================================================================
+
+
+def get_lpips_metric(device: str = "cuda"):
+    """Get or create LPIPS metric instance (cached)."""
+    if device not in _lpips_metric_cache:
+        if LPIPS_AVAILABLE and lpips is not None:
+            _lpips_metric_cache[device] = lpips.LPIPS(net="alex").to(device)
+        else:
+            _lpips_metric_cache[device] = None
+    return _lpips_metric_cache[device]
+
+
+def normalize_tensors_for_metrics(
+    *tensors: torch.Tensor, device: str = "cuda"
+) -> tuple:
+    """
+    Normalize tensors for metric computation: move to device, ensure float32, add batch dim.
+
+    Args:
+        *tensors: Variable number of tensors to normalize
+        device: Target device
+
+    Returns:
+        Tuple of normalized tensors in [B, C, H, W] format
+    """
+    normalized = []
+    for tensor in tensors:
+        # Move to device and ensure float32
+        tensor = tensor.to(device).float()
+        # Ensure [B, C, H, W] format (torchmetrics requires batch dimension)
+        if tensor.ndim == 3:  # [C, H, W]
+            tensor = tensor.unsqueeze(0)  # [1, C, H, W]
+        normalized.append(tensor)
+    return tuple(normalized)
+
+
+def get_standard_metrics(device: str = "cuda") -> tuple:
+    """
+    Get initialized standard metrics (PSNR, SSIM) for [-1,1] range data.
+
+    Args:
+        device: Target device
+
+    Returns:
+        Tuple of (psnr_metric, ssim_metric)
+    """
+    if not TORCHMETRICS_AVAILABLE:
+        raise ImportError(
+            "torchmetrics is required for PSNR and SSIM metrics. "
+            "Please install torchmetrics or fix the lzma module issue."
+        )
+    psnr_metric = PSNR(data_range=2.0).to(device)  # Range is 2.0 for [-1,1] data
+    ssim_metric = SSIM(data_range=2.0).to(device)  # Range is 2.0 for [-1,1] data
+    return psnr_metric, ssim_metric
+
+
+def compute_core_metrics(
+    enhanced: torch.Tensor, long: torch.Tensor, device: str = "cuda"
+) -> Dict[str, float]:
+    """
+    Compute core metrics: PSNR, SSIM, MSE.
+
+    Args:
+        enhanced: Enhanced image tensor
+        long: Reference image tensor
+        device: Device for computation
+
+    Returns:
+        Dictionary with core metrics
+    """
+    psnr_metric, ssim_metric = get_standard_metrics(device)
+    psnr_val = psnr_metric(enhanced, long).item()
+    ssim_val = ssim_metric(enhanced, long).item()
+    mse_val = F.mse_loss(enhanced, long).item()
+
+    return {
+        "ssim": ssim_val if not np.isnan(ssim_val) else 0.0,
+        "psnr": psnr_val if not np.isnan(psnr_val) else 0.0,
+        "mse": mse_val,
+    }
+
+
+def compute_lpips(
+    enhanced: torch.Tensor, long: torch.Tensor, device: str = "cuda"
+) -> float:
+    """
+    Compute LPIPS metric.
+
+    Args:
+        enhanced: Enhanced image tensor in [-1,1] range
+        long: Reference image tensor in [-1,1] range
+        device: Device for computation
+
+    Returns:
+        LPIPS value (NaN if computation fails)
+    """
+    lpips_val = float("nan")
+    lpips_metric = get_lpips_metric(device)
+    if lpips_metric is not None:
+        try:
+            from .normalization import convert_range
+
+            enhanced_01 = convert_range(enhanced, "[-1,1]", "[0,1]")
+            long_01 = convert_range(long, "[-1,1]", "[0,1]")
+            lpips_val = lpips_metric(enhanced_01, long_01).item()
+        except Exception as e:
+            logger.warning(f"LPIPS computation failed: {e}")
+            lpips_val = float("nan")
+    else:
+        logger.warning("lpips library not available - LPIPS set to NaN")
+
+    return lpips_val
+
+
+def compute_niqe(enhanced: torch.Tensor) -> float:
+    """
+    Compute NIQE metric.
+
+    Args:
+        enhanced: Enhanced image tensor in [-1,1] range
+
+    Returns:
+        NIQE value (NaN if computation fails)
+    """
+    niqe_val = float("nan")
+    if PQIQA_AVAILABLE and pyiqa is not None:
+        try:
+            from .normalization import convert_range
+
+            enhanced_01 = convert_range(enhanced, "[-1,1]", "[0,1]")
+            niqe_metric = pyiqa.create_metric("niqe")
+            niqe_val = niqe_metric(enhanced_01).item()
+        except Exception as e:
+            logger.warning(f"NIQE computation failed: {e}")
+            niqe_val = float("nan")
+    return niqe_val
+
+
+def compute_all_metrics(
+    enhanced: torch.Tensor, long: torch.Tensor, device: str = "cuda"
+) -> Dict[str, float]:
+    """
+    Compute all metrics: core metrics (PSNR, SSIM, MSE) + LPIPS + NIQE.
+
+    Args:
+        enhanced: Enhanced image tensor in [B, C, H, W] format
+        long: Reference image tensor in [B, C, H, W] format
+        device: Device for computation
+
+    Returns:
+        Dictionary with all metrics
+    """
+    # Compute core metrics (PSNR, SSIM, MSE)
+    metrics = compute_core_metrics(enhanced, long, device)
+    metrics["lpips"] = compute_lpips(enhanced, long, device)
+    metrics["niqe"] = compute_niqe(enhanced)
+
+    return metrics
+
+
+def compute_metrics_by_method(
+    long: torch.Tensor,
+    enhanced: torch.Tensor,
+    method: str,
+    device: str = "cuda",
+) -> Dict[str, float]:
+    """
+    Compute metrics based on method type.
+
+    Metric sets:
+      - "short": PSNR only
+      - "exposure_scaled": PSNR, SSIM, MSE
+      - All other restoration methods: PSNR, SSIM, MSE, LPIPS, NIQE
+
+    Args:
+        long: Reference image [C, H, W] or [B, C, H, W] in [-1,1] range
+        enhanced: Enhanced image [C, H, W] or [B, C, H, W] in [-1,1] range
+        method: Method name ('short', 'exposure_scaled', or restoration method)
+        device: Device for computation
+
+    Returns:
+        Dictionary with method-specific metrics
+    """
+    # Normalize tensors for metric computation
+    long, enhanced = normalize_tensors_for_metrics(long, enhanced, device=device)
+
+    if method == "short":
+        # Short exposure: PSNR only
+        psnr_metric, _ = get_standard_metrics(device)
+        psnr_val = psnr_metric(enhanced, long).item()
+        return {
+            "psnr": psnr_val if not np.isnan(psnr_val) else 0.0,
+        }
+    elif method == "exposure_scaled":
+        # Exposure scaled: PSNR, SSIM, MSE only
+        return compute_core_metrics(enhanced, long, device)
+    else:
+        # All other restoration methods: full metrics (PSNR, SSIM, MSE, LPIPS, NIQE)
+        return compute_all_metrics(enhanced, long, device)
+
+
+def filter_metrics_for_json(
+    metrics_results: Dict[str, Dict[str, float]], sensor_type: str = "sony"
+) -> Dict[str, Dict[str, float]]:
+    """
+    Filter metrics to include only selected metrics for each method.
+
+    Metric sets:
+      - Short: PSNR only
+      - Exposure scaled: PSNR, SSIM, MSE
+      - All other restoration methods: PSNR, SSIM, MSE, LPIPS, NIQE
+
+    Args:
+        metrics_results: Dictionary with metrics for each method
+        sensor_type: Sensor type ('sony' or 'fuji') - kept for compatibility and logging
+
+    Returns:
+        Filtered dictionary with only selected metrics
+    """
+    filtered = {}
+
+    for method, metrics in metrics_results.items():
+        if method == "short":
+            # Short exposure: PSNR only
+            filtered[method] = {"psnr": metrics.get("psnr", float("nan"))}
+        elif method == "exposure_scaled":
+            # Exposure scaled: PSNR, SSIM, MSE only
+            filtered[method] = {
+                "psnr": metrics.get("psnr", float("nan")),
+                "ssim": metrics.get("ssim", float("nan")),
+                "mse": metrics.get("mse", float("nan")),
+            }
+        elif method in [
+            "gaussian_x0",
+            "gaussian",
+            "pg_x0",
+            "pg",
+            "pg_score",
+        ]:
+            # All other restoration methods: PSNR, SSIM, MSE, LPIPS, NIQE
+            filtered[method] = {
+                "psnr": metrics.get("psnr", float("nan")),
+                "ssim": metrics.get("ssim", float("nan")),
+                "mse": metrics.get("mse", float("nan")),
+                "lpips": metrics.get("lpips", float("nan")),
+                "niqe": metrics.get("niqe", float("nan")),
+            }
+        elif method == "long":
+            # Skip long - no metrics computed (self-comparison is always perfect)
+            continue
+        else:
+            # Unknown method - include all available metrics
+            filtered[method] = metrics
+
+    return filtered
+
+
+def get_nan_metrics_for_method(method: str) -> Dict[str, float]:
+    """Get appropriate NaN metrics dictionary based on method type."""
+    base_metrics = {"psnr": float("nan")}
+    if method != "short":
+        base_metrics.update({"ssim": float("nan"), "mse": float("nan")})
+    if method not in ["short", "exposure_scaled"]:
+        base_metrics.update({"lpips": float("nan"), "niqe": float("nan")})
+    return base_metrics
+
+
+def get_nan_metrics_dict(include_all: bool = True) -> Dict[str, float]:
+    """
+    Get a dictionary with NaN values for all metrics.
+
+    Args:
+        include_all: If True, include all metrics. If False, only core metrics.
+
+    Returns:
+        Dictionary with NaN values for metrics
+    """
+    metrics = {
+        "ssim": float("nan"),
+        "psnr": float("nan"),
+        "mse": float("nan"),
+    }
+    if include_all:
+        metrics["lpips"] = float("nan")
+        metrics["niqe"] = float("nan")
+    return metrics
+
+
+# ============================================================================
+# FID Calculator
+# ============================================================================
+
+
+def _setup_edm_for_fid():
+    """
+    Lazily set up EDM framework for FID computation.
+    Only called when FIDCalculator is instantiated.
+
+    Returns:
+        True if EDM is available, False otherwise
+    """
+    global EDM_AVAILABLE
+
+    # Only set up once
+    if EDM_AVAILABLE:
+        return True
+
+    # Add project root and EDM to path only when needed
+    project_root = Path(__file__).parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    edm_path = project_root / "external" / "edm"
+    if str(edm_path) not in sys.path:
+        sys.path.insert(0, str(edm_path))
+
+    # Try to import EDM utilities
+    try:
+        import external.edm.dnnlib
+
+        EDM_AVAILABLE = True
+        return True
+    except ImportError as e:
+        EDM_AVAILABLE = False
+        logger.warning(
+            f"EDM framework not available: {e}. FID computation requires EDM dependencies."
+        )
+        return False
+
+
+class FIDCalculator:
+    """Calculate Fréchet Inception Distance (FID) between two sets of images."""
+
+    def __init__(self, device: torch.device = None):
+        """
+        Initialize FID calculator with pre-trained InceptionV3 model.
+
+        Args:
+            device: Device for computation. If None, auto-detects.
+        """
+        # Lazily set up EDM framework
+        if not _setup_edm_for_fid():
+            raise RuntimeError(
+                "EDM framework required for NVIDIA Inception model. Please install EDM dependencies."
+            )
+
+        # Now import external since it's been set up
+        import external.edm.dnnlib
+
+        if device is None:
+            from .utils.tensor_utils import get_device
+
+            self.device = get_device(prefer_cuda=True)
+        else:
+            self.device = device
+
+        # Load NVIDIA pre-trained Inception-v3 model (same as EDM)
+        detector_url = "https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/metrics/inception-2015-12-05.pkl"
+        detector_kwargs = dict(return_features=True)
+
+        try:
+            with external.edm.dnnlib.util.open_url(detector_url, verbose=True) as f:
+                detector_net = pickle.load(f).to(self.device)
+            self.detector_net = detector_net
+            self.feature_dim = 2048
+            self.detector_kwargs = detector_kwargs
+        except Exception as e:
+            raise RuntimeError(f"Failed to load Inception model: {e}")
+
+    def _extract_features(self, images: torch.Tensor) -> torch.Tensor:
+        """
+        Extract features from images using InceptionV3.
+
+        Args:
+            images: Input images [B, C, H, W] in range [0, 1]
+
+        Returns:
+            Feature vectors [B, 2048] as torch.Tensor
+        """
+        with torch.no_grad():
+            # Handle grayscale conversion
+            if images.shape[1] == 1:
+                images = images.repeat([1, 3, 1, 1])
+
+            # Extract features using NVIDIA model
+            features = self.detector_net(
+                images.to(self.device), **self.detector_kwargs
+            ).to(torch.float64)
+
+            return features
+
+    def calculate_inception_stats(
+        self, images: List[torch.Tensor], batch_size: int = 32
+    ) -> tuple:
+        """
+        Calculate Inception statistics.
+
+        Args:
+            images: List of image tensors [C, H, W] in range [-1, 1]
+            batch_size: Batch size for processing
+
+        Returns:
+            (mu, sigma) tuple of mean and covariance matrices
+        """
+        # Convert images from [-1, 1] to [0, 1]
+        images_01 = [(img + 1.0) / 2.0 for img in images]
+
+        # Batch processing
+        mu = torch.zeros([self.feature_dim], dtype=torch.float64, device=self.device)
+        sigma = torch.zeros(
+            [self.feature_dim, self.feature_dim],
+            dtype=torch.float64,
+            device=self.device,
+        )
+
+        for i in tqdm.tqdm(range(0, len(images_01), batch_size), unit="batch"):
+            batch = images_01[i : i + batch_size]
+            batch_tensor = torch.stack(batch, dim=0)
+
+            # Extract features
+            features = self._extract_features(batch_tensor)
+
+            # Accumulate statistics
+            mu += features.sum(0)
+            sigma += features.T @ features
+
+        # Normalize
+        mu /= len(images_01)
+        sigma -= mu.ger(mu) * len(images_01)
+        sigma /= len(images_01) - 1
+
+        return mu.cpu().numpy(), sigma.cpu().numpy()
+
+    def _calculate_fid_from_stats(
+        self, mu1: np.ndarray, sigma1: np.ndarray, mu2: np.ndarray, sigma2: np.ndarray
+    ) -> float:
+        """
+        Calculate FID between two sets of statistics (mean and covariance).
+
+        Args:
+            mu1: Mean vector from first set [2048]
+            sigma1: Covariance matrix from first set [2048, 2048]
+            mu2: Mean vector from second set [2048]
+            sigma2: Covariance matrix from second set [2048, 2048]
+
+        Returns:
+            FID score (lower is better)
+        """
+        m = np.square(mu1 - mu2).sum()
+        s, _ = scipy.linalg.sqrtm(np.dot(sigma1, sigma2), disp=False)
+        fid = m + np.trace(sigma1 + sigma2 - s * 2)
+        return float(np.real(fid))
+
+    def compute_fid(
+        self,
+        images1: List[torch.Tensor],
+        images2: List[torch.Tensor],
+        batch_size: int = 32,
+    ) -> float:
+        """
+        Compute FID between two sets of images.
+
+        Args:
+            images1: First set of images [C, H, W] in range [-1, 1]
+            images2: Second set of images [C, H, W] in range [-1, 1]
+            batch_size: Batch size for processing
+
+        Returns:
+            FID score (lower is better)
+        """
+        # Ensure we have enough samples
+        if len(images1) < 2 or len(images2) < 2:
+            logger.warning(
+                f"Insufficient samples for FID: {len(images1)}, {len(images2)}"
+            )
+            return float("nan")
+
+        # Calculate statistics
+        mu1, sigma1 = self.calculate_inception_stats(images1, batch_size=batch_size)
+        mu2, sigma2 = self.calculate_inception_stats(images2, batch_size=batch_size)
+
+        # Calculate FID
+        fid_score = self._calculate_fid_from_stats(mu1, sigma1, mu2, sigma2)
+
+        return fid_score
+
+
+def load_images_from_directory(
+    directory: Path, prefix: str = "", suffix: str = ".pt", device: torch.device = None
+) -> List[torch.Tensor]:
+    """
+    Load all .pt files from a directory.
+
+    Args:
+        directory: Directory containing .pt files
+        prefix: Optional prefix to filter files
+        suffix: File suffix to match (default: .pt)
+        device: Device to load tensors to (optional, not used for loading)
+
+    Returns:
+        List of image tensors [C, H, W]
+    """
+    images = []
+
+    # Find all .pt files
+    pt_files = sorted(directory.glob(f"{prefix}*{suffix}"))
+
+    for pt_file in pt_files:
+        try:
+            try:
+                from .utils.data_utils import load_tensor
+
+                tensor = load_tensor(
+                    pt_file, device=None, map_location="cpu", weights_only=False
+                )
+            except Exception as e:
+                logger.error(f"Failed to load {pt_file}: {e}")
+                continue
+
+            # Handle different tensor formats
+            if isinstance(tensor, dict):
+                if "restored" in tensor:
+                    tensor = tensor["restored"]
+                elif "noisy" in tensor:
+                    tensor = tensor["noisy"]
+                elif "clean" in tensor:
+                    tensor = tensor["clean"]
+                elif "image" in tensor:
+                    tensor = tensor["image"]
+                else:
+                    raise ValueError(f"Unrecognized dict structure in {pt_file}")
+
+            # Ensure float32
+            tensor = tensor.float()
+
+            # Ensure proper shape [C, H, W] or [H, W]
+            if tensor.ndim == 2:  # (H, W)
+                tensor = tensor.unsqueeze(0)  # (1, H, W)
+            elif tensor.ndim == 3 and tensor.shape[-1] in [1, 3]:  # (H, W, C)
+                tensor = tensor.permute(2, 0, 1)  # (C, H, W)
+
+            images.append(tensor)
+
+        except Exception as e:
+            logger.warning(f"Failed to load {pt_file}: {e}")
+            continue
+
+    return images
+
+
+# ============================================================================
+# Physics-Specific Metrics
+# ============================================================================
 
 
 class ResidualAnalyzer:
@@ -116,6 +705,14 @@ class ResidualAnalyzer:
                 "background": background,
                 "read_noise": read_noise,
             }
+        )
+
+        # Add spectral flatness from whiteness analysis
+        spectral_analysis = self._compute_spectral_analysis(
+            residuals_np, pred_electrons.shape
+        )
+        results["whiteness_spectral_flatness"] = spectral_analysis.get(
+            "spectral_flatness", float("nan")
         )
 
         return results
@@ -419,7 +1016,7 @@ class EvaluationReport:
 
     method_name: str
     dataset_name: str
-    domain: str
+    sensor: str
 
     # Physics metrics
     chi2_consistency: MetricResult
@@ -427,8 +1024,11 @@ class EvaluationReport:
     residual_whiteness: MetricResult  # Spectral flatness
     bias_analysis: MetricResult
 
-    # Domain-specific metrics
-    domain_metrics: Dict[str, MetricResult]
+    # Standard image quality metrics (optional)
+    image_quality_metrics: Optional[Dict[str, float]] = None
+
+    # Sensor-specific metrics
+    sensor_metrics: Dict[str, MetricResult]
 
     # Summary statistics
     num_images: int
@@ -452,15 +1052,16 @@ class EvaluationReport:
             if key in data:
                 data[key] = MetricResult(**data[key])
 
-        if "domain_metrics" in data:
-            data["domain_metrics"] = {
-                k: MetricResult(**v) for k, v in data["domain_metrics"].items()
+        # Handle sensor field
+        if "sensor" in data:
+            data["sensor"] = data["sensor"]
+
+        if "sensor_metrics" in data:
+            data["sensor_metrics"] = {
+                k: MetricResult(**v) for k, v in data["sensor_metrics"].items()
             }
 
         return cls(**data)
-
-
-# StandardMetrics class removed - now using torchmetrics and piq in sampling script
 
 
 class PhysicsMetrics:
@@ -729,157 +1330,12 @@ class PhysicsMetrics:
         )
 
 
-class DomainSpecificMetrics:
-    """Domain-specific metrics for different imaging applications."""
+class SensorSpecificMetrics:
+    """Sensor-specific metrics for imaging applications."""
 
     def __init__(self):
-        """Initialize domain-specific metrics."""
+        """Initialize sensor-specific metrics."""
         pass
-
-    def compute_counting_accuracy(
-        self,
-        pred: torch.Tensor,
-        target: torch.Tensor,
-        threshold: float = 0.1,
-        mask: Optional[torch.Tensor] = None,
-    ) -> MetricResult:
-        """
-        Compute counting accuracy for microscopy applications.
-
-        Measures how well the restoration preserves fluorophore counts.
-
-        Args:
-            pred: Predicted image [B, C, H, W] (normalized [0,1])
-            target: Ground truth image [B, C, H, W] (normalized [0,1])
-            threshold: Detection threshold for counting
-            mask: Valid pixel mask [B, C, H, W]
-
-        Returns:
-            Counting accuracy metric result
-        """
-        # Apply mask if provided
-        if mask is not None:
-            pred = pred * mask
-            target = target * mask
-
-        # Threshold for detection
-        pred_detections = (pred > threshold).float()
-        target_detections = (target > threshold).float()
-
-        # Count total detections
-        pred_count = pred_detections.sum().item()
-        target_count = target_detections.sum().item()
-
-        # Compute relative error
-        if target_count > 0:
-            count_error = abs(pred_count - target_count) / target_count
-        else:
-            count_error = float("inf") if pred_count > 0 else 0.0
-
-        # Compute spatial overlap (intersection over union)
-        intersection = (pred_detections * target_detections).sum().item()
-        union = (
-            (pred_detections + target_detections - pred_detections * target_detections)
-            .sum()
-            .item()
-        )
-
-        if union > 0:
-            iou = intersection / union
-        else:
-            iou = 1.0 if intersection == 0 else 0.0
-
-        # Combined accuracy metric
-        accuracy = (1.0 - count_error) * iou
-        accuracy = max(0.0, accuracy)  # Ensure non-negative
-
-        return MetricResult(
-            value=accuracy,
-            metadata={
-                "pred_count": pred_count,
-                "target_count": target_count,
-                "count_error": count_error,
-                "iou": iou,
-                "threshold": threshold,
-            },
-        )
-
-    def compute_photometry_error(
-        self,
-        pred: torch.Tensor,
-        target: torch.Tensor,
-        source_positions: List[Tuple[int, int]],
-        aperture_radius: int = 5,
-        mask: Optional[torch.Tensor] = None,
-    ) -> MetricResult:
-        """
-        Compute photometry error for astronomy applications.
-
-        Measures accuracy of flux measurements for point sources.
-
-        Args:
-            pred: Predicted image [B, C, H, W] (normalized [0,1])
-            target: Ground truth image [B, C, H, W] (normalized [0,1])
-            source_positions: List of (y, x) positions for point sources
-            aperture_radius: Radius for aperture photometry
-            mask: Valid pixel mask [B, C, H, W]
-
-        Returns:
-            Photometry error metric result
-        """
-        if pred.shape[0] != 1:
-            raise ValueError("Photometry error currently supports batch size 1")
-
-        pred_img = pred[0, 0]  # Assume single channel
-        target_img = target[0, 0]
-
-        if mask is not None:
-            mask_img = mask[0, 0]
-        else:
-            mask_img = torch.ones_like(pred_img)
-
-        photometry_errors = []
-
-        for y, x in source_positions:
-            # Create circular aperture
-            h, w = pred_img.shape
-            yy, xx = torch.meshgrid(torch.arange(h), torch.arange(w), indexing="ij")
-            aperture = ((yy - y) ** 2 + (xx - x) ** 2) <= aperture_radius**2
-            aperture = aperture.float()
-
-            # Apply mask
-            aperture = aperture * mask_img
-
-            if aperture.sum() == 0:
-                continue
-
-            # Measure flux in aperture
-            pred_flux = (pred_img * aperture).sum().item()
-            target_flux = (target_img * aperture).sum().item()
-
-            # Compute relative error
-            if target_flux > 1e-6:
-                rel_error = abs(pred_flux - target_flux) / target_flux
-                photometry_errors.append(rel_error)
-
-        if not photometry_errors:
-            return MetricResult(
-                value=float("nan"),
-                metadata={"error": "No valid sources for photometry"},
-            )
-
-        mean_error = np.mean(photometry_errors)
-        std_error = np.std(photometry_errors)
-
-        return MetricResult(
-            value=mean_error,
-            metadata={
-                "std": std_error,
-                "num_sources": len(photometry_errors),
-                "aperture_radius": aperture_radius,
-                "individual_errors": photometry_errors,
-            },
-        )
 
     def compute_resolution_metric(
         self,
@@ -981,7 +1437,7 @@ class EvaluationSuite:
         """
         self.device = device
         self.physics_metrics = PhysicsMetrics()
-        self.domain_metrics = DomainSpecificMetrics()
+        self.sensor_metrics = SensorSpecificMetrics()
         self.residual_analyzer = ResidualAnalyzer(device)
 
         logger.info(f"EvaluationSuite initialized on device: {device}")
@@ -992,13 +1448,14 @@ class EvaluationSuite:
         target: torch.Tensor,
         noisy: torch.Tensor,
         scale: float,
-        domain: str,
+        sensor: str,
         background: float = 0.0,
         read_noise: float = 0.0,
         mask: Optional[torch.Tensor] = None,
         method_name: str = "unknown",
         dataset_name: str = "unknown",
-        domain_specific_params: Optional[Dict[str, Any]] = None,
+        sensor_specific_params: Optional[Dict[str, Any]] = None,
+        compute_image_quality: bool = True,
     ) -> EvaluationReport:
         """
         Perform comprehensive evaluation of a restoration method.
@@ -1008,27 +1465,25 @@ class EvaluationSuite:
             target: Ground truth clean image [B, C, H, W] (normalized [0,1])
             noisy: Noisy observation [B, C, H, W] (electrons)
             scale: Normalization scale (electrons)
-            domain: Domain name ('photography', 'microscopy', 'astronomy')
+            sensor: Sensor name ('sony' or 'fuji')
             background: Background offset (electrons)
             read_noise: Read noise standard deviation (electrons)
             mask: Valid pixel mask [B, C, H, W]
             method_name: Name of the restoration method
             dataset_name: Name of the dataset
-            domain_specific_params: Additional parameters for domain-specific metrics
+            sensor_specific_params: Additional parameters for sensor-specific metrics
+            compute_image_quality: If True, compute standard image quality metrics
 
         Returns:
             Complete evaluation report
         """
-        import time
-
         start_time = time.time()
 
-        logger.info(f"Evaluating {method_name} on {dataset_name} ({domain})")
+        logger.info(f"Evaluating {method_name} on {dataset_name} ({sensor})")
 
         # Convert to electron space for consistent metrics
         pred_electrons = pred * scale + background
         target_electrons = target * scale + background
-        data_range_electrons = scale
 
         # Physics metrics
         logger.debug("Computing physics metrics...")
@@ -1039,7 +1494,7 @@ class EvaluationSuite:
         # Residual analysis
         try:
             residual_stats = self.residual_analyzer.analyze_residuals(
-                pred_electrons, noisy, read_noise, mask
+                pred, noisy, scale, background, read_noise, mask
             )
             dist_meta = {
                 "mean": residual_stats["mean"],
@@ -1052,9 +1507,15 @@ class EvaluationSuite:
             )
 
             whiteness_meta = {
-                "spectral_flatness": residual_stats["whiteness_spectral_flatness"],
-                "autocorr_x": residual_stats["autocorrelation_lag1_x"],
-                "autocorr_y": residual_stats["autocorrelation_lag1_y"],
+                "spectral_flatness": residual_stats.get(
+                    "whiteness_spectral_flatness", float("nan")
+                ),
+                "autocorr_x": residual_stats.get(
+                    "autocorrelation_lag1_x", float("nan")
+                ),
+                "autocorr_y": residual_stats.get(
+                    "autocorrelation_lag1_y", float("nan")
+                ),
             }
             residual_whiteness = MetricResult(
                 value=whiteness_meta["spectral_flatness"], metadata=whiteness_meta
@@ -1072,46 +1533,32 @@ class EvaluationSuite:
             residual_whiteness = nan_result
             bias = nan_result
 
-        # Domain-specific metrics
-        logger.debug("Computing domain-specific metrics...")
-        domain_metrics_dict = {}
+        # Standard image quality metrics (optional)
+        image_quality_metrics = None
+        if compute_image_quality:
+            logger.debug("Computing standard image quality metrics...")
+            try:
+                # Convert to [-1, 1] range for standard metrics
+                from .normalization import convert_range
 
-        if domain == "microscopy":
-            # Counting accuracy
-            counting = self.domain_metrics.compute_counting_accuracy(
-                pred, target, mask=mask
-            )
-            domain_metrics_dict["counting_accuracy"] = counting
-
-            # Resolution preservation
-            resolution = self.domain_metrics.compute_resolution_metric(
-                pred, target, mask=mask
-            )
-            domain_metrics_dict["resolution_preservation"] = resolution
-
-        elif domain == "astronomy":
-            # Photometry error (requires source positions)
-            if domain_specific_params and "source_positions" in domain_specific_params:
-                photometry = self.domain_metrics.compute_photometry_error(
-                    pred,
-                    target,
-                    domain_specific_params["source_positions"],
-                    aperture_radius=domain_specific_params.get("aperture_radius", 5),
-                    mask=mask,
+                pred_norm = convert_range(pred, "[0,1]", "[-1,1]")
+                target_norm = convert_range(target, "[0,1]", "[-1,1]")
+                image_quality_metrics = compute_all_metrics(
+                    pred_norm, target_norm, device=self.device
                 )
-                domain_metrics_dict["photometry_error"] = photometry
+            except Exception as e:
+                logger.warning(f"Image quality metrics computation failed: {e}")
+                image_quality_metrics = None
 
-            # Resolution preservation
-            resolution = self.domain_metrics.compute_resolution_metric(
-                pred, target, mask=mask
-            )
-            domain_metrics_dict["resolution_preservation"] = resolution
+        # Sensor-specific metrics (sony/fuji)
+        logger.debug("Computing sensor-specific metrics...")
+        sensor_metrics_dict = {}
 
-        elif domain == "photography":
-            resolution = self.domain_metrics.compute_resolution_metric(
-                pred, target, mask=mask
-            )
-            domain_metrics_dict["resolution_preservation"] = resolution
+        # Resolution preservation
+        resolution = self.sensor_metrics.compute_resolution_metric(
+            pred, target, mask=mask
+        )
+        sensor_metrics_dict["resolution_preservation"] = resolution
 
         processing_time = time.time() - start_time
 
@@ -1119,12 +1566,13 @@ class EvaluationSuite:
         report = EvaluationReport(
             method_name=method_name,
             dataset_name=dataset_name,
-            domain=domain,
+            sensor=sensor,
             chi2_consistency=chi2,
             residual_distribution=residual_dist,
             residual_whiteness=residual_whiteness,
             bias_analysis=bias,
-            domain_metrics=domain_metrics_dict,
+            image_quality_metrics=image_quality_metrics,
+            sensor_metrics=sensor_metrics_dict,
             num_images=pred.shape[0],
             processing_time=processing_time,
         )
@@ -1150,10 +1598,11 @@ class EvaluationSuite:
         if not reports:
             raise ValueError("No reports provided for comparison")
 
-        # Group reports by dataset and domain
+        # Group reports by dataset and sensor
         grouped_reports = {}
         for report in reports:
-            key = f"{report.dataset_name}_{report.domain}"
+            sensor = getattr(report, "sensor", "unknown")
+            key = f"{report.dataset_name}_{sensor}"
             if key not in grouped_reports:
                 grouped_reports[key] = []
             grouped_reports[key].append(report)
@@ -1164,9 +1613,9 @@ class EvaluationSuite:
             # Split on last underscore to handle dataset names with underscores
             parts = key.rsplit("_", 1)
             if len(parts) == 2:
-                dataset_name, domain = parts
+                dataset_name, sensor = parts
             else:
-                dataset_name, domain = key, "unknown"
+                dataset_name, sensor = key, "unknown"
 
             # Extract metrics for comparison
             methods = [r.method_name for r in group_reports]
@@ -1183,9 +1632,26 @@ class EvaluationSuite:
                 "bias_analysis": [r.bias_analysis.value for r in group_reports],
             }
 
-            # Add domain-specific metrics
+            # Add image quality metrics if available
+            if any(r.image_quality_metrics for r in group_reports):
+                for metric_name in ["psnr", "ssim", "mse", "lpips", "niqe"]:
+                    values = []
+                    for r in group_reports:
+                        if (
+                            r.image_quality_metrics
+                            and metric_name in r.image_quality_metrics
+                        ):
+                            values.append(r.image_quality_metrics[metric_name])
+                        else:
+                            values.append(float("nan"))
+                    metrics_comparison[metric_name] = values
+
+            # Add sensor-specific metrics
             for report in group_reports:
-                for metric_name, metric_result in report.domain_metrics.items():
+                sensor_metrics = getattr(
+                    report, "sensor_metrics", getattr(report, "domain_metrics", {})
+                )
+                for metric_name, metric_result in sensor_metrics.items():
                     if metric_name not in metrics_comparison:
                         metrics_comparison[metric_name] = []
                     metrics_comparison[metric_name].append(metric_result.value)
@@ -1204,8 +1670,10 @@ class EvaluationSuite:
                 if metric_name in [
                     "chi2_consistency",
                     "bias_analysis",
-                    "photometry_error",
                     "residual_distribution",
+                    "mse",
+                    "lpips",
+                    "niqe",
                 ]:
                     best_idx = min(valid_values, key=lambda x: x[1])[0]
                 else:
@@ -1215,7 +1683,7 @@ class EvaluationSuite:
 
             comparison_results[key] = {
                 "dataset": dataset_name,
-                "domain": domain,
+                "sensor": sensor,
                 "metrics": metrics_comparison,
                 "best_methods": best_methods,
             }
@@ -1245,7 +1713,8 @@ class EvaluationSuite:
 
         grouped = {}
         for report in reports:
-            key = f"{report.method_name}_{report.domain}"
+            sensor = getattr(report, "sensor", "unknown")
+            key = f"{report.method_name}_{sensor}"
             if key not in grouped:
                 grouped[key] = []
             grouped[key].append(report)
@@ -1255,9 +1724,9 @@ class EvaluationSuite:
         for key, group_reports in grouped.items():
             parts = key.rsplit("_", 1)
             if len(parts) == 2:
-                method_name, domain = parts
+                method_name, sensor = parts
             else:
-                method_name, domain = key, "unknown"
+                method_name, sensor = key, "unknown"
 
             chi2_values = [
                 r.chi2_consistency.value
@@ -1272,7 +1741,7 @@ class EvaluationSuite:
 
             summary[key] = {
                 "method": method_name,
-                "domain": domain,
+                "sensor": sensor,
                 "num_evaluations": len(group_reports),
                 "chi2_stats": {
                     "mean": np.mean(chi2_values) if chi2_values else float("nan"),
@@ -1302,7 +1771,11 @@ class EvaluationSuite:
         return summary
 
 
-# Utility functions for baseline comparison
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+
 def load_baseline_results(baseline_dir: str) -> Dict[str, List[EvaluationReport]]:
     """
     Load baseline evaluation results from directory.
@@ -1356,3 +1829,120 @@ def save_evaluation_results(reports: List[EvaluationReport], output_file: str) -
         json.dump(data, f, indent=2)
 
     logger.info(f"Saved {len(reports)} evaluation results to {output_file}")
+
+
+# ============================================================================
+# Command-line Interface for FID
+# ============================================================================
+
+
+def main():
+    """Main function for FID computation."""
+    parser = argparse.ArgumentParser(
+        description="Compute FID between two sets of images"
+    )
+
+    # Input arguments
+    parser.add_argument(
+        "--restored_dir",
+        type=str,
+        required=True,
+        help="Directory containing restored/generated images (.pt files)",
+    )
+    parser.add_argument(
+        "--clean_dir",
+        type=str,
+        required=True,
+        help="Directory containing clean reference images (.pt files)",
+    )
+    parser.add_argument(
+        "--restored_prefix",
+        type=str,
+        default="restored_",
+        help="Prefix for restored image files (default: restored_)",
+    )
+    parser.add_argument(
+        "--clean_prefix",
+        type=str,
+        default="",
+        help="Prefix for clean image files (default: empty)",
+    )
+
+    # Output arguments
+    parser.add_argument(
+        "--output_file",
+        type=str,
+        default="fid_results.json",
+        help="Output JSON file for FID results",
+    )
+
+    # Device arguments
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        help="Device for computation (cuda or cpu)",
+    )
+    parser.add_argument(
+        "--batch_size", type=int, default=32, help="Batch size for feature extraction"
+    )
+
+    args = parser.parse_args()
+
+    # Setup
+    restored_dir = Path(args.restored_dir)
+    clean_dir = Path(args.clean_dir)
+    output_file = Path(args.output_file)
+
+    from .utils.file_utils import save_json_file
+    from .utils.tensor_utils import get_device
+
+    device = get_device(prefer_cuda=(args.device == "cuda"))
+
+    # Load images
+    restored_images = load_images_from_directory(
+        restored_dir, prefix=args.restored_prefix
+    )
+
+    clean_images = load_images_from_directory(clean_dir, prefix=args.clean_prefix)
+
+    if len(restored_images) == 0:
+        logger.error("No restored images found!")
+        return
+
+    if len(clean_images) == 0:
+        logger.error("No clean images found!")
+        return
+
+    logger.info(
+        f"Loaded {len(restored_images)} restored images and {len(clean_images)} clean images"
+    )
+
+    # Initialize FID calculator
+    fid_calculator = FIDCalculator(device=device)
+
+    # Compute FID
+    fid_score = fid_calculator.compute_fid(
+        restored_images,
+        clean_images,
+        batch_size=args.batch_size,
+    )
+
+    # Save results
+    results = {
+        "fid_score": float(fid_score),
+        "num_restored_images": len(restored_images),
+        "num_clean_images": len(clean_images),
+        "restored_dir": str(restored_dir),
+        "clean_dir": str(clean_dir),
+    }
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    save_json_file(output_file, results)
+
+    print(f"FID Score: {fid_score:.4f}")
+    print(f"Results saved to: {output_file}")
+
+
+if __name__ == "__main__":
+    main()

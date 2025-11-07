@@ -1,40 +1,150 @@
 """
 Error handling utilities for Poisson-Gaussian Diffusion.
 
-This module provides sophisticated error handling, recovery mechanisms,
-and diagnostic tools for robust operation in production environments.
+Provides error handling, recovery mechanisms, diagnostic tools, and custom exceptions.
 """
 
 import logging
 import traceback
-import warnings
 from contextlib import contextmanager
 from functools import wraps
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import torch
 
-from .exceptions import (
-    CalibrationError,
-    ConfigurationError,
-    DataError,
-    DomainError,
-    GuidanceError,
-    MetadataError,
-    ModelError,
-    NumericalStabilityError,
-    PoissonDiffusionError,
-    TransformError,
-)
+# ============================================================================
+# Custom Exceptions
+# ============================================================================
+
+
+class PoissonDiffusionError(Exception):
+    """Base exception for all project-specific errors."""
+
+    pass
+
+
+class CalibrationError(PoissonDiffusionError):
+    """Raised when sensor calibration is invalid or missing."""
+
+    pass
+
+
+class TransformError(PoissonDiffusionError):
+    """Raised when image transformation fails."""
+
+    pass
+
+
+class MetadataError(PoissonDiffusionError):
+    """Raised when metadata is invalid or corrupted."""
+
+    pass
+
+
+class GuidanceError(PoissonDiffusionError):
+    """Raised when likelihood guidance computation fails."""
+
+    pass
+
+
+class ModelError(PoissonDiffusionError):
+    """Raised when model operations fail."""
+
+    pass
+
+
+class DataError(PoissonDiffusionError):
+    """Raised when data loading or processing fails."""
+
+    pass
+
+
+class NumericalStabilityError(PoissonDiffusionError):
+    """Raised when numerical instability is detected."""
+
+    pass
+
+
+class SensorError(PoissonDiffusionError):
+    """Raised when sensor-specific operations fail."""
+
+    pass
+
+
+class ConfigurationError(PoissonDiffusionError):
+    """Raised when configuration is invalid."""
+
+    pass
+
+
+class InvalidPhotonCountError(GuidanceError):
+    """Raised when photon counts are invalid (negative, NaN, etc.)."""
+
+    pass
+
+
+class UnsupportedSensorError(SensorError):
+    """Raised when an unsupported sensor is specified."""
+
+    pass
+
+
+class IncompatibleMetadataError(MetadataError):
+    """Raised when metadata is incompatible with current operation."""
+
+    pass
+
+
+class ReconstructionError(TransformError):
+    """Raised when image reconstruction fails."""
+
+    pass
+
+
+class CalibrationParameterError(CalibrationError):
+    """Raised when calibration parameters are physically unreasonable."""
+
+    pass
+
+
+class ValidationError(PoissonDiffusionError):
+    """Raised when validation checks fail."""
+
+    pass
+
+
+class SamplingError(PoissonDiffusionError):
+    """Raised when sampling operations fail."""
+
+    pass
+
+
+class TrainingError(PoissonDiffusionError):
+    """Raised when training operations fail."""
+
+    pass
+
+
+class PerformanceError(PoissonDiffusionError):
+    """Raised when performance operations fail."""
+
+    pass
+
+
+class AnalysisError(PoissonDiffusionError):
+    """Raised when analysis operations fail."""
+
+    pass
+
+
+# ============================================================================
+# Error Handling Classes
+# ============================================================================
 
 
 class ErrorHandler:
-    """
-    Centralized error handling with recovery mechanisms.
-
-    Note: This class is designed to be pickle-safe for distributed training.
-    """
+    """Centralized error handling with recovery mechanisms."""
 
     def __init__(
         self,
@@ -42,20 +152,9 @@ class ErrorHandler:
         enable_recovery: bool = True,
         strict_mode: bool = False,
     ):
-        """
-        Initialize error handler.
-
-        Args:
-            logger: Logger instance for error reporting
-            enable_recovery: Whether to attempt automatic recovery
-            strict_mode: Whether to raise all errors (no recovery)
-        """
-        # Store logger name instead of logger instance to avoid pickle issues
         self._logger_name = logger.name if logger else __name__
         self.enable_recovery = enable_recovery and not strict_mode
         self.strict_mode = strict_mode
-
-        # Error statistics
         self.error_counts: Dict[str, int] = {}
         self.recovery_counts: Dict[str, int] = {}
 
@@ -71,41 +170,25 @@ class ErrorHandler:
         recovery_func: Optional[Callable] = None,
         **recovery_kwargs,
     ) -> Any:
-        """
-        Handle an error with optional recovery.
-
-        Args:
-            error: The exception that occurred
-            context: Context description for logging
-            recovery_func: Function to attempt recovery
-            **recovery_kwargs: Arguments for recovery function
-
-        Returns:
-            Recovery result if successful, otherwise re-raises
-        """
+        """Handle an error with optional recovery."""
         error_type = type(error).__name__
         self.error_counts[error_type] = self.error_counts.get(error_type, 0) + 1
 
-        # Log the error
         self.logger.error(f"Error in {context}: {error_type}: {str(error)}")
         self.logger.debug(f"Traceback: {traceback.format_exc()}")
 
-        # Attempt recovery if enabled and function provided
         if self.enable_recovery and recovery_func is not None:
             try:
                 self.logger.info(f"Attempting recovery for {error_type}")
                 result = recovery_func(**recovery_kwargs)
-
                 self.recovery_counts[error_type] = (
                     self.recovery_counts.get(error_type, 0) + 1
                 )
                 self.logger.info(f"Recovery successful for {error_type}")
                 return result
-
             except Exception as recovery_error:
                 self.logger.error(f"Recovery failed for {error_type}: {recovery_error}")
 
-        # Re-raise the original error
         raise error
 
     def get_statistics(self) -> Dict[str, Any]:
@@ -121,9 +204,7 @@ class ErrorHandler:
 
 
 class NumericalStabilityManager:
-    """
-    Advanced numerical stability management with adaptive thresholds.
-    """
+    """Advanced numerical stability management with adaptive thresholds."""
 
     def __init__(
         self,
@@ -134,25 +215,12 @@ class NumericalStabilityManager:
         adaptive: bool = True,
         logger: Optional[logging.Logger] = None,
     ):
-        """
-        Initialize numerical stability manager.
-
-        Args:
-            eps_variance: Minimum variance value
-            grad_clip: Gradient clipping threshold
-            range_min: Minimum allowed value
-            range_max: Maximum allowed value
-            adaptive: Whether to adapt thresholds based on data
-            logger: Logger for warnings and diagnostics
-        """
         self.eps_variance = eps_variance
         self.grad_clip = grad_clip
         self.range_min = range_min
         self.range_max = range_max
         self.adaptive = adaptive
         self.logger = logger or logging.getLogger(__name__)
-
-        # Adaptive statistics
         self.variance_history: List[float] = []
         self.gradient_history: List[float] = []
         self.adaptation_count = 0
@@ -160,24 +228,10 @@ class NumericalStabilityManager:
     def check_and_fix_tensor(
         self, tensor: torch.Tensor, name: str = "tensor", fix_issues: bool = True
     ) -> torch.Tensor:
-        """
-        Check tensor for issues and optionally fix them.
-
-        Args:
-            tensor: Input tensor
-            name: Name for logging
-            fix_issues: Whether to fix issues automatically
-
-        Returns:
-            Fixed tensor (if fix_issues=True) or original tensor
-
-        Raises:
-            NumericalStabilityError: If issues found and fix_issues=False
-        """
+        """Check tensor for issues and optionally fix them."""
         issues = []
         fixed_tensor = tensor.clone()
 
-        # Check for NaN values
         nan_mask = torch.isnan(tensor)
         if nan_mask.any():
             issues.append(f"NaN values: {nan_mask.sum().item()}")
@@ -188,12 +242,10 @@ class NumericalStabilityManager:
             else:
                 raise NumericalStabilityError(f"{name} contains NaN values")
 
-        # Check for Inf values
         inf_mask = torch.isinf(tensor)
         if inf_mask.any():
             issues.append(f"Inf values: {inf_mask.sum().item()}")
             if fix_issues:
-                # Replace with large but finite values
                 max_finite = torch.finfo(tensor.dtype).max / 10
                 fixed_tensor = torch.where(
                     inf_mask & (tensor > 0),
@@ -242,24 +294,12 @@ class NumericalStabilityManager:
     def stabilize_variance(
         self, variance: torch.Tensor, name: str = "variance"
     ) -> torch.Tensor:
-        """
-        Stabilize variance with adaptive thresholds.
-
-        Args:
-            variance: Variance tensor
-            name: Name for logging
-
-        Returns:
-            Stabilized variance
-        """
-        # Update statistics for adaptation
+        """Stabilize variance with adaptive thresholds."""
         if self.adaptive:
             current_min = variance.min().item()
             self.variance_history.append(current_min)
 
-            # Adapt threshold if we have enough history
             if len(self.variance_history) > 100:
-                # Use 5th percentile as adaptive threshold
                 adaptive_eps = np.percentile(self.variance_history[-100:], 5)
                 if adaptive_eps > 0 and adaptive_eps < self.eps_variance:
                     old_eps = self.eps_variance
@@ -269,7 +309,6 @@ class NumericalStabilityManager:
                         f"Adapted variance threshold: {old_eps:.6f} -> {self.eps_variance:.6f}"
                     )
 
-        # Apply stabilization
         original_min = variance.min().item()
         stabilized = torch.clamp(variance, min=self.eps_variance)
 
@@ -283,24 +322,12 @@ class NumericalStabilityManager:
     def clip_gradients(
         self, gradients: torch.Tensor, name: str = "gradients"
     ) -> torch.Tensor:
-        """
-        Clip gradients with adaptive thresholds.
-
-        Args:
-            gradients: Gradient tensor
-            name: Name for logging
-
-        Returns:
-            Clipped gradients
-        """
-        # Update statistics for adaptation
+        """Clip gradients with adaptive thresholds."""
         if self.adaptive:
             current_norm = gradients.norm().item()
             self.gradient_history.append(current_norm)
 
-            # Adapt threshold if we have enough history
             if len(self.gradient_history) > 100:
-                # Use 95th percentile as adaptive threshold
                 adaptive_clip = np.percentile(self.gradient_history[-100:], 95)
                 if adaptive_clip > self.grad_clip:
                     old_clip = self.grad_clip
@@ -310,7 +337,6 @@ class NumericalStabilityManager:
                         f"Adapted gradient clip: {old_clip:.3f} -> {self.grad_clip:.3f}"
                     )
 
-        # Apply clipping
         original_norm = gradients.norm().item()
         clipped = torch.clamp(gradients, -self.grad_clip, self.grad_clip)
 
@@ -328,15 +354,7 @@ def safe_operation(
     error_types: tuple = (Exception,),
     logger: Optional[logging.Logger] = None,
 ):
-    """
-    Decorator for safe operations with automatic error handling.
-
-    Args:
-        operation_name: Name of the operation for logging
-        recovery_func: Function to call for recovery
-        error_types: Types of errors to catch
-        logger: Logger instance
-    """
+    """Decorator for safe operations with automatic error handling."""
 
     def decorator(func):
         @wraps(func)
@@ -369,14 +387,7 @@ def error_context(
     logger: Optional[logging.Logger] = None,
     suppress_errors: bool = False,
 ):
-    """
-    Context manager for error handling with detailed logging.
-
-    Args:
-        context_name: Name of the context for logging
-        logger: Logger instance
-        suppress_errors: Whether to suppress errors (return None on error)
-    """
+    """Context manager for error handling with detailed logging."""
     ctx_logger = logger or logging.getLogger(__name__)
 
     try:
@@ -392,9 +403,7 @@ def error_context(
 
 
 class DiagnosticCollector:
-    """
-    Collect and analyze diagnostic information for debugging.
-    """
+    """Collect and analyze diagnostic information for debugging."""
 
     def __init__(self):
         self.diagnostics: Dict[str, List[Any]] = {}
@@ -424,7 +433,6 @@ class DiagnosticCollector:
                 "latest": data_list[-1] if data_list else None,
             }
 
-            # Add statistics for numeric data
             if all(isinstance(x, (int, float)) for x in data_list):
                 summary[category].update(
                     {

@@ -4,7 +4,7 @@
 # Training hyperparameters
 batch_size: 4
 learning_rate: 0.0001
-total_kimg: 200  # ~0.4 epochs over 51,840 training tiles (135 long images × 384 tiles)
+total_kimg: 600  # ~0.8 epochs over 51,840 training tiles (135 long images × 384 tiles)
 
 # EMA configuration
 ema_halflife_kimg: 50

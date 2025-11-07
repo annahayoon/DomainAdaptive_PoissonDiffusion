@@ -90,7 +90,6 @@ strict_equality = true
 [[tool.mypy.overrides]]
 module = [
     "rawpy.*",
-    "astropy.*",
     "tifffile.*",
     "external.edm.*",
 ]

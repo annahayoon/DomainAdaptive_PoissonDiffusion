@@ -88,7 +88,7 @@ data/processed/
 │       └── long/                      # Ground truth (brighter)
 │           └── fuji_*.pt
 ├── comprehensive_tiles_metadata.json  # Complete pipeline metadata
-├── metadata_photography_incremental.json  # Progress checkpoint
+├── metadata_sony_incremental.json  # Progress checkpoint (or metadata_fuji_incremental.json)
 └── visualizations/                     # (if --visualize enabled)
     └── {sensor}_{scene_id}_steps.png   # 3-step processing visualization with tile IDs
 ```
@@ -269,8 +269,8 @@ results = pipeline.run_pt_tiles_pipeline(
 
 # Check results
 print(f"Total tiles: {results['total_tiles']:,}")
-print(f"Files processed: {results['domains']['photography']['files_processed']}")
-# Note: 'photography' domain name still used internally for backward compatibility
+print(f"Files processed: {results['sensors']['sony']['files_processed']}")
+# Note: Results are now organized by sensor (sony/fuji) instead of domain
 ```
 
 ### Advanced: Custom Processing
@@ -295,7 +295,7 @@ print(f"Tiles processed: {len(file_data['tiles'])}")
 ### Sensor Detection
 
 ```python
-from preprocessing.sensor_detector import SensorDetector
+from core.sensor_detector import SensorDetector
 
 # Detect sensor from path
 sensor = SensorDetector.detect("/data/Sony/short/photo.ARW")
@@ -327,7 +327,7 @@ Initialize the pipeline.
 pipeline = SimpleTilesPipeline("/path/to/data")
 ```
 
-#### `load_photography_raw(file_path: str) → Tuple[np.ndarray, Dict]`
+#### `load_photography_raw(file_path: str) → Tuple[np.ndarray, Dict]` (sensor-agnostic)
 
 Load and demosaic raw image.
 
@@ -511,7 +511,7 @@ A: The pipeline uses predefined sensor ranges from configuration (config.py). So
 
 **Q: What happens if processing is interrupted?**
 
-A: Incremental metadata is saved after each file in `metadata_photography_incremental.json`. You can resume from where you left off (automatic on re-run).
+A: Incremental metadata is saved after each file in `metadata_sony_incremental.json` (or `metadata_fuji_incremental.json`). You can resume from where you left off (automatic on re-run).
 
 **Q: Can I parallelize processing?**
 

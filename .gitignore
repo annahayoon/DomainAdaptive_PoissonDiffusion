@@ -2,15 +2,10 @@
 # Python Standard Ignores
 # =============================================================================
 
-# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
-
-# Distribution / packaging
 .Python
 build/
 develop-eggs/
@@ -31,16 +26,10 @@ share/python-wheels/
 *.egg
 MANIFEST
 .kiro
-
-# PyInstaller
 *.manifest
 *.spec
-
-# Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
-
-# Unit test / coverage reports
 htmlcov/
 .tox/
 .nox/
@@ -53,8 +42,6 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
-
-# Translations
 *.mo
 *.pot
 
@@ -62,29 +49,16 @@ coverage.xml
 # Framework-specific Ignores
 # =============================================================================
 
-# Django stuff
 *.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
-
-# Flask stuff
 instance/
 .webassets-cache
-
-# Scrapy stuff
 .scrapy
-
-# Sphinx documentation
 docs/_build/
-
-# PyBuilder
 target/
-
-# Jupyter Notebook
 .ipynb_checkpoints
-
-# IPython
 profile_default/
 ipython_config.py
 
@@ -92,13 +66,8 @@ ipython_config.py
 # Environment and Virtual Environment
 # =============================================================================
 
-# pyenv
 .python-version
-
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow
 __pypackages__/
-
-# Virtual environments
 .env
 .venv
 env/
@@ -111,25 +80,14 @@ venv.bak/
 # Development Tools
 # =============================================================================
 
-# Spyder project settings
 .spyderproject
 .spyproject
-
-# Rope project settings
 .ropeproject
-
-# mkdocs documentation
 /site
-
-# mypy
 .mypy_cache/
 .dmypy.json
 dmypy.json
-
-# Pyre type checker
 .pyre/
-
-# IDE files
 .vscode/
 .idea/
 *.swp
@@ -140,7 +98,6 @@ dmypy.json
 # Project-specific Ignores
 # =============================================================================
 
-# Training outputs
 checkpoints/
 logs/
 outputs/
@@ -149,22 +106,16 @@ wandb/
 tensorboard_logs/
 evaluation_results/
 evaluation_results_*
-
-# Additional directories to ignore
 dataset/
 docs/
 external/
 htmlcov/
 results/
-
-# Data directories (usually large and not tracked)
 datasets/
 *.h5
 *.hdf5
 *.npz
 *.npy
-
-# Model files (usually large)
 *.pth
 *.pt
 *.ckpt
@@ -172,8 +123,6 @@ datasets/
 *.pkl
 models/pretrained/
 models/checkpoints/
-
-# Temporary files
 *.tmp
 *.temp
 
@@ -181,14 +130,11 @@ models/checkpoints/
 # OS Generated Files
 # =============================================================================
 
-# macOS
 .DS_Store
 .DS_Store?
 ._*
 .Spotlight-V100
 .Trashes
-
-# Windows
 ehthumbs.db
 Thumbs.db
 
@@ -196,28 +142,20 @@ Thumbs.db
 # System Files
 # =============================================================================
 
-# Profiling data
 *.prof
 *.profile
-
-# Memory dumps
 *.dmp
-
-# Configuration files with secrets
 config/secrets.yaml
 config/local.yaml
 .env.local
 .env.production
-
-# Experiment tracking
 mlruns/
 .mlflow/
 
 # =============================================================================
-# Large Files (for testing)
+# Large Files
 # =============================================================================
 
-# Large image files for testing
 *.tiff
 *.tif
 *.raw
@@ -230,39 +168,29 @@ test_images/large/
 # Backup and Cache
 # =============================================================================
 
-# Backup files
 *.bak
 *.backup
 *~
-
-# Cache directories
+backup/
 .cache/
 
 # =============================================================================
 # Documentation and Build
 # =============================================================================
 
-# Documentation build
 docs/build/
 
 # =============================================================================
 # Temporary Project Files
 # =============================================================================
 
-# Training/job scripts (usually temporary)
 savio_job*.sh
 singleA40*.sh
 run_*gpu*.sh
 run_memory_optimized*.sh
 run_edm_native_train.sh
-
-# All markdown files in root directory
 /*.md
-
-# All txt files in root directory
 /*.txt
-
-# Temporary documentation files
 *_INSTRUCTIONS.md
 *_EXPLANATION.md
 *_DECISION.md
@@ -271,27 +199,22 @@ run_edm_native_train.sh
 *_REVIEW.md
 plan.md
 corrected_phase*_assessment.md
-
-# Temporary test/debug scripts
 fix_*.py
 add_*.py
 ddp_*.py
 *_workaround.py
 update_*.py
 proper_*.py
-
-# Shell utility scripts (temporary)
 pin_*.sh
 quick_*.sh
 restart_*.sh
 validate_*.sh
 sync_*.sh
-
-# Patch files
 *.patch
-
-# Tags file
 tags
 
-# Anthropic directory (contains API keys and sensitive data)
+# =============================================================================
+# Sensitive Data
+# =============================================================================
+
 Anthropic/

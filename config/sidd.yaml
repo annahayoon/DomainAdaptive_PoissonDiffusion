@@ -1,0 +1,48 @@
+# Training configuration for SIDD direct loading with random crops
+# This config uses SIDDRandomCropDataset to load .MAT files directly without preprocessing
+
+# Dataset configuration (single dataset mode)
+dataset:
+  class_name: "data.dataset.SIDDRandomCropDataset"
+  data_root: "/home/jilab/Jae/external/dataset/sidd/SIDD_Small_Raw_Only/Data"
+  split: "train"
+  image_size: 256
+  channels: 3  # 4 for Bayer raw, or 3 for demosaiced RGB
+  crops_per_image: 100  # Number of random crops per image per epoch
+  use_labels: false
+  label_dim: 0
+
+# Training hyperparameters
+training:
+  batch_size: 64  # Total batch size across all GPUs
+  batch_gpu: 8    # Per-GPU batch size (A40 with 40GB can handle ~8-16)
+  total_kimg: 600  # 600k images (~38 epochs over 16k images: 160 images × 100 crops)
+  ema_halflife_kimg: 50  # EMA half-life (standard for diffusion models)
+  lr_rampup_kimg: 50   # LR rampup over ~3.1 epochs (50k images)
+  kimg_per_tick: 50       # Progress interval
+  snapshot_ticks: 10      # Save every 10 ticks (more frequent checkpoints)
+  early_stopping_patience: 10  # Stop if no improvement for 10 ticks
+
+# Model architecture
+model:
+  img_resolution: 256
+  channels: 4  # Must match dataset channels
+  model_channels: 128  # Base model channels
+  channel_mult: [1, 2, 2, 2]  # Channel multipliers
+
+# Optimizer
+optimizer:
+  lr: 0.0002  # Learning rate
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+# System
+system:
+  seed: 42
+  device: "cuda"
+  num_workers: 4
+  pin_memory: true
+
+# Output
+output:
+  output_dir: "results/sidd_direct_training"
