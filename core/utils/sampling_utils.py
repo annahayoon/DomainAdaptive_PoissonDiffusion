@@ -9,7 +9,7 @@ sampling configuration, and batch processing utilities.
 import logging
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -23,7 +23,10 @@ from core.metrics import (
     get_nan_metrics_for_method,
 )
 from core.normalization import convert_range
-from core.sampler import EDMSampler
+
+# Avoid circular import - import EDMSampler only for type checking
+if TYPE_CHECKING:
+    from core.sampler import EDMSampler
 from core.utils.data_utils import (
     analyze_image_brightness,
     apply_exposure_scaling,
@@ -138,7 +141,7 @@ def create_guidance_modules(
 
 
 def run_restoration_methods(
-    sampler: EDMSampler,
+    sampler: "EDMSampler",
     short_image: torch.Tensor,
     long_image: Optional[torch.Tensor],
     sigma_max: float,

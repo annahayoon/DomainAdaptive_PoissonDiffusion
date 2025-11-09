@@ -1024,15 +1024,15 @@ class EvaluationReport:
     residual_whiteness: MetricResult  # Spectral flatness
     bias_analysis: MetricResult
 
-    # Standard image quality metrics (optional)
-    image_quality_metrics: Optional[Dict[str, float]] = None
-
-    # Sensor-specific metrics
+    # Sensor-specific metrics (must come before optional fields)
     sensor_metrics: Dict[str, MetricResult]
 
-    # Summary statistics
+    # Summary statistics (must come before optional fields)
     num_images: int
     processing_time: float
+
+    # Standard image quality metrics (optional - must come last)
+    image_quality_metrics: Optional[Dict[str, float]] = None
 
     def to_json(self) -> str:
         """Serialize to JSON."""

@@ -12,7 +12,9 @@ sys.path.insert(0, str(project_root))
 edm_path = project_root / "external" / "edm"
 sys.path.insert(0, str(edm_path))
 
-from core.dataset import SimplePTDataset
+import importlib
+
+from core.dataset import SIDDRandomCropDataset, SimplePTDataset
 from core.utils.file_utils import load_yaml_config
 from core.utils.tensor_utils import get_device
 from core.utils.training_utils import (
@@ -186,8 +188,89 @@ def run_training(
     )
 
 
+def _instantiate_dataset_from_config(dataset_config, split, image_size, channels):
+    """Instantiate a dataset from config, supporting class_name for dynamic loading."""
+    if "class_name" in dataset_config:
+        # Dynamic class loading from config
+        class_name = dataset_config["class_name"]
+        try:
+            # Handle both "module.Class" and "Class" formats
+            if "." in class_name:
+                module_path, class_name_only = class_name.rsplit(".", 1)
+                module = importlib.import_module(module_path)
+            else:
+                # Try common locations
+                try:
+                    from core import dataset as dataset_module
+
+                    module = dataset_module
+                    class_name_only = class_name
+                except ImportError:
+                    raise ImportError(
+                        f"Could not import dataset module for {class_name}"
+                    )
+
+            dataset_class = getattr(module, class_name_only)
+        except (ImportError, AttributeError) as e:
+            dist.print0(f"ERROR: Could not load dataset class '{class_name}': {e}")
+            raise
+
+        # Extract dataset parameters from config
+        kwargs = {
+            "split": split,  # Use the split parameter passed to function, not from config
+            "image_size": image_size,
+            "channels": channels,
+        }
+
+        # Add dataset-specific parameters
+        if "data_root" in dataset_config:
+            kwargs["data_root"] = dataset_config["data_root"]
+        if "metadata_json" in dataset_config:
+            kwargs["metadata_json"] = dataset_config["metadata_json"]
+        if "crops_per_image" in dataset_config:
+            kwargs["crops_per_image"] = dataset_config["crops_per_image"]
+        if "tiles_per_image" in dataset_config:
+            kwargs["tiles_per_image"] = dataset_config["tiles_per_image"]
+        if "use_labels" in dataset_config:
+            kwargs["use_labels"] = dataset_config["use_labels"]
+        if "label_dim" in dataset_config:
+            kwargs["label_dim"] = dataset_config["label_dim"]
+        if "random_seed" in dataset_config:
+            kwargs["random_seed"] = dataset_config["random_seed"]
+
+        # Pass through any other config parameters (but NOT split, image_size, channels - those come from function args)
+        for key, value in dataset_config.items():
+            if key not in [
+                "class_name",
+                "data_root",
+                "metadata_json",
+                "crops_per_image",
+                "tiles_per_image",
+                "use_labels",
+                "label_dim",
+                "random_seed",
+                "split",
+                "image_size",
+                "channels",
+            ]:
+                kwargs[key] = value
+
+        return dataset_class(**kwargs)
+    else:
+        # Fallback to SimplePTDataset for backward compatibility
+        data_root = dataset_config.get("data_root")
+        metadata_json = dataset_config.get("metadata_json")
+        return SimplePTDataset(
+            data_root=data_root,
+            metadata_json=metadata_json,
+            split=split,
+            image_size=image_size,
+            channels=channels,
+        )
+
+
 def _create_single_dataset(data_root, metadata_json, split, image_size, channels):
-    """Create a single SimplePTDataset instance."""
+    """Create a single SimplePTDataset instance (backward compatibility)."""
     return SimplePTDataset(
         data_root=data_root,
         metadata_json=metadata_json,
@@ -198,7 +281,13 @@ def _create_single_dataset(data_root, metadata_json, split, image_size, channels
 
 
 def _create_datasets(args, config):
-    """Create train and validation datasets from config."""
+    """Create train and validation datasets from config.
+
+    Supports both:
+    1. Multiple datasets via config["datasets"] list
+    2. Single dataset via config["dataset"] dict (with optional class_name)
+    3. Backward compatibility: config["data_root"] and config["metadata_json"]
+    """
     if "datasets" in config and isinstance(config["datasets"], list):
         from torch.utils.data import ConcatDataset
 
@@ -207,18 +296,16 @@ def _create_datasets(args, config):
 
         for dataset_config in config["datasets"]:
             train_datasets.append(
-                _create_single_dataset(
-                    data_root=dataset_config["data_root"],
-                    metadata_json=dataset_config["metadata_json"],
+                _instantiate_dataset_from_config(
+                    dataset_config=dataset_config,
                     split="train",
                     image_size=args.img_resolution,
                     channels=args.channels,
                 )
             )
             val_datasets.append(
-                _create_single_dataset(
-                    data_root=dataset_config["data_root"],
-                    metadata_json=dataset_config["metadata_json"],
+                _instantiate_dataset_from_config(
+                    dataset_config=dataset_config,
                     split="validation",
                     image_size=args.img_resolution,
                     channels=args.channels,
@@ -227,7 +314,23 @@ def _create_datasets(args, config):
 
         train_dataset = ConcatDataset(train_datasets)
         val_dataset = ConcatDataset(val_datasets)
+    elif "dataset" in config and isinstance(config["dataset"], dict):
+        # Single dataset with class_name support
+        dataset_config = config["dataset"]
+        train_dataset = _instantiate_dataset_from_config(
+            dataset_config=dataset_config,
+            split="train",
+            image_size=args.img_resolution,
+            channels=args.channels,
+        )
+        val_dataset = _instantiate_dataset_from_config(
+            dataset_config=dataset_config,
+            split="validation",
+            image_size=args.img_resolution,
+            channels=args.channels,
+        )
     else:
+        # Backward compatibility: use data_root and metadata_json
         data_root = args.data_root or config.get("data_root")
         metadata_json = args.metadata_json or config.get("metadata_json")
 

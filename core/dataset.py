@@ -19,7 +19,6 @@ from core.demosaic import (
     extract_camera_id_from_scene_name,
     get_cfa_pattern_from_scene_name,
 )
-from core.normalization import convert_range
 from core.utils.data_utils import extract_scene_id_from_tile_id, extract_scene_id_padded
 from core.utils.tensor_utils import _ensure_chw_format, ensure_tensor
 
@@ -29,11 +28,10 @@ logger = get_logger(__name__)
 def _normalize_to_diffusion_range(image: np.ndarray) -> np.ndarray:
     """Normalize image from [0, 1] to [-1, 1] for diffusion model.
 
-    Uses core.normalization.convert_range internally.
+    Simple inline normalization to avoid import issues with core.normalization.
     """
-    tensor = torch.from_numpy(image)
-    normalized_tensor = convert_range(tensor, from_range="[0,1]", to_range="[-1,1]")
-    return normalized_tensor.numpy()
+    # Simple linear mapping from [0, 1] to [-1, 1]
+    return image * 2.0 - 1.0
 
 
 def _normalize_split_name(split_name: str) -> str:
@@ -484,6 +482,7 @@ class SIDDRandomCropDataset(BaseEDMDataset):
         use_labels: bool = False,
         label_dim: int = 0,
         tiles_per_image: Optional[int] = None,
+        crops_per_image: Optional[int] = None,  # Alias for tiles_per_image
         random_seed: Optional[int] = None,
         **kwargs,
     ):
@@ -496,8 +495,16 @@ class SIDDRandomCropDataset(BaseEDMDataset):
             )
 
         self.data_root = Path(data_root)
-        self.tiles_per_image = tiles_per_image
+        # Support both tiles_per_image and crops_per_image (crops_per_image takes precedence)
+        self.tiles_per_image = (
+            crops_per_image if crops_per_image is not None else tiles_per_image
+        )
         self.random_seed = random_seed
+        self.split = split  # Set split before calling _find_gt_files()
+        self.image_size = (
+            image_size  # Set image_size before calling _extract_random_tiles()
+        )
+        self.channels = channels  # Set channels before calling _extract_random_tiles()
 
         if random_seed is not None:
             random.seed(random_seed)
@@ -506,26 +513,40 @@ class SIDDRandomCropDataset(BaseEDMDataset):
         if not self.data_root.exists():
             raise FileNotFoundError(f"Data directory not found: {self.data_root}")
 
-        self.image_files = self._find_gt_files()
-        self.tiles = self._extract_random_tiles()
-
         super().__init__(
             split=split,
             image_size=image_size,
             channels=channels,
             use_labels=use_labels,
             label_dim=label_dim,
-            dataset_length=len(self.tiles),
+            dataset_length=0,  # Will be set after _find_gt_files()
             dataset_name=f"SIDDTiled_{split}",
         )
 
+        self.image_files = self._find_gt_files()
+        # Calculate dataset length: list_entries × 150 images × crops_per_image
+        # Each list entry represents one scene with 150 images
+        num_list_entries = getattr(
+            self, "_num_list_entries", len(self.image_files) // 150
+        )
+        tiles_per_img = self.tiles_per_image or 2
+        estimated_length = num_list_entries * 150 * tiles_per_img
+
+        # Update dataset_length and _raw_idx
+        self._raw_shape[0] = estimated_length
+        self._raw_idx = np.arange(estimated_length, dtype=np.int64)
+
     def _find_gt_files(self) -> List[Path]:
-        """Find all GT_RAW .MAT files in SIDD structure, filtered by split."""
+        """Find all GT_RAW .MAT files in SIDD structure, filtered by split.
+
+        Loads all 150 images from each scene's {scene_id}_GT_RAW folder.
+        Scene IDs are extracted from train/val list entries (first part before underscore).
+        """
         split_name = self.split if self.split != "validation" else "val"
         possible_split_files = [
+            self.data_root / f"SIDD_{split_name}_list.txt",
             self.data_root.parent / f"SIDD_{split_name}_list.txt",
             self.data_root.parent.parent / f"SIDD_{split_name}_list.txt",
-            self.data_root / f"{split_name}_list.txt",
             Path(
                 f"/home/jilab/anna_OS_ML/PKL-DiffusionDenoising/data/raw/SID/splits/SIDD_{split_name}_list.txt"
             ),
@@ -534,30 +555,102 @@ class SIDDRandomCropDataset(BaseEDMDataset):
         split_file = next((c for c in possible_split_files if c.exists()), None)
 
         if split_file is None:
-            valid_scenes = None
-        else:
-            with open(split_file, "r") as f:
-                valid_scenes = set(line.strip() for line in f if line.strip())
+            raise FileNotFoundError(
+                f"Split file not found for '{split_name}'. Tried: {possible_split_files}"
+            )
 
+        # Extract scene IDs from split file (first part before underscore)
+        # e.g., "0001_001_S6_00100_00060_3200_L" -> "0001"
+        valid_scene_ids = set()
+        list_entries = []  # Store all list entries for counting
+        with open(split_file, "r") as f:
+            for line in f:
+                scene_name = line.strip()
+                if scene_name:
+                    list_entries.append(scene_name)
+                    scene_id = scene_name.split("_")[0]
+                    valid_scene_ids.add(scene_id)
+
+        if not valid_scene_ids:
+            raise FileNotFoundError(
+                f"No valid scene IDs found in split file: {split_file}"
+            )
+
+        # Store number of list entries for dataset length calculation
+        self._num_list_entries = len(list_entries)
+
+        # Load all MAT files from each {scene_id}_GT_RAW folder
         gt_files = []
-        for scene_dir in sorted(self.data_root.iterdir()):
-            if not scene_dir.is_dir():
+        scene_name_map = {}  # Map scene_id -> list of scene names from split file
+
+        # First, build a map of scene_id -> scene names
+        with open(split_file, "r") as f:
+            for line in f:
+                scene_name = line.strip()
+                if scene_name:
+                    scene_id = scene_name.split("_")[0]
+                    if scene_id not in scene_name_map:
+                        scene_name_map[scene_id] = []
+                    scene_name_map[scene_id].append(scene_name)
+
+        # Load all MAT files from each {scene_id}_GT_RAW folder
+        for scene_id in sorted(valid_scene_ids):
+            scene_gt_dir = self.data_root / f"{scene_id}_GT_RAW"
+            if not scene_gt_dir.exists() or not scene_gt_dir.is_dir():
+                logger.warning(f"GT_RAW directory not found: {scene_gt_dir}")
                 continue
 
-            if valid_scenes is not None and scene_dir.name not in valid_scenes:
+            # Load all GT_RAW_*.MAT files (should be 150 files per scene)
+            # Files can be in two locations:
+            # 1. Directly in scene folder: 0001_GT_RAW/0001_GT_RAW_001.MAT
+            # 2. In nested subdirectory: 0033_GT_RAW/0033_GT_RAW/GT_RAW_001.MAT
+            scene_gt_files = []
+
+            # Try direct files first (pattern: *_GT_RAW_*.MAT)
+            direct_files = sorted(scene_gt_dir.glob("*_GT_RAW_*.MAT"))
+            scene_gt_files.extend(direct_files)
+
+            # Try simple pattern (GT_RAW_*.MAT) for direct files
+            if not scene_gt_files:
+                simple_files = sorted(scene_gt_dir.glob("GT_RAW_*.MAT"))
+                scene_gt_files.extend(simple_files)
+
+            # If no direct files, check for nested subdirectory
+            if not scene_gt_files:
+                nested_dir = scene_gt_dir / scene_gt_dir.name
+                if nested_dir.exists() and nested_dir.is_dir():
+                    # Try nested files with pattern *_GT_RAW_*.MAT
+                    nested_files = sorted(nested_dir.glob("*_GT_RAW_*.MAT"))
+                    scene_gt_files.extend(nested_files)
+
+                    # Try nested files with pattern GT_RAW_*.MAT
+                    if not nested_files:
+                        nested_simple = sorted(nested_dir.glob("GT_RAW_*.MAT"))
+                        scene_gt_files.extend(nested_simple)
+
+            if not scene_gt_files:
+                logger.warning(
+                    f"No GT_RAW MAT files found in {scene_gt_dir} (checked direct and nested)"
+                )
                 continue
 
-            gt_candidates = list(scene_dir.glob("GT_RAW_*.MAT"))
-            if not gt_candidates:
-                continue
+            # Store scene name mapping for later use in demosaicing
+            # Use the first scene name from the list for this scene_id
+            scene_name_for_camera = scene_name_map.get(
+                scene_id, [f"{scene_id}_UNKNOWN"]
+            )[0]
 
-            gt_files.append(gt_candidates[0])
+            for mat_file in scene_gt_files:
+                gt_files.append((mat_file, scene_name_for_camera))
 
         if not gt_files:
             raise FileNotFoundError(
                 f"No GT_RAW_*.MAT files found in {self.data_root} for split '{self.split}'"
             )
 
+        logger.info(
+            f"Found {len(gt_files)} GT_RAW files from {len(valid_scene_ids)} scenes for split '{self.split}'"
+        )
         return gt_files
 
     def _load_mat_image(self, mat_path: Path) -> np.ndarray:
@@ -596,8 +689,7 @@ class SIDDRandomCropDataset(BaseEDMDataset):
         """Extract random non-overlapping tiles from all images."""
         all_tiles = []
 
-        for mat_path in self.image_files:
-            scene_name = mat_path.parent.name
+        for mat_path, scene_name in self.image_files:
             camera_id = extract_camera_id_from_scene_name(scene_name)
 
             image = self._load_mat_image(mat_path)
@@ -663,16 +755,87 @@ class SIDDRandomCropDataset(BaseEDMDataset):
         return all_tiles
 
     def __len__(self):
-        """Return total number of tiles."""
-        return len(self.tiles)
+        """Return total number of tiles: list_entries × 150 images × crops_per_image."""
+        num_list_entries = getattr(
+            self, "_num_list_entries", len(self.image_files) // 150
+        )
+        tiles_per_img = self.tiles_per_image or 2
+        return num_list_entries * 150 * tiles_per_img
 
     def __getitem__(self, idx):
-        """Get tile at index."""
-        raw_idx = self._raw_idx[idx]
-        tile = self.tiles[raw_idx]
-        image = tile["tile_data"].copy()
-        label = self.get_label(idx)
-        return image, label
+        """Get tile at index - processes image on-demand."""
+        # Calculate which image and tile index
+        tiles_per_img = self.tiles_per_image or 2
+        image_idx = idx // tiles_per_img
+        tile_idx = idx % tiles_per_img
+
+        if image_idx >= len(self.image_files):
+            # Wrap around for infinite sampling
+            image_idx = image_idx % len(self.image_files)
+
+        mat_path, scene_name = self.image_files[image_idx]
+        camera_id = extract_camera_id_from_scene_name(scene_name)
+
+        # Load and process image on-demand
+        image = self._load_mat_image(mat_path)
+
+        cfa_pattern_str = (
+            get_cfa_pattern_from_scene_name(scene_name, return_string=True) or "rggb"
+        )
+
+        if image.ndim == 2:
+            image = demosaic_bayer_to_rgb(
+                image,
+                cfa_pattern=cfa_pattern_str,
+                output_channel_order="RGB",
+                alg_type="VNG",
+            )
+
+        if image.ndim == 3 and image.shape[2] == 3:
+            image = np.transpose(image, (2, 0, 1))
+        elif image.ndim == 2:
+            image = np.expand_dims(image, axis=0)
+
+        if image.ndim != 3 or image.shape[0] != self.channels:
+            # Return a dummy tile if image is invalid
+            return np.zeros(
+                (self.channels, self.image_size, self.image_size), dtype=np.float32
+            ), self.get_label(idx)
+
+        H, W = image.shape[1], image.shape[2]
+
+        if H < self.image_size or W < self.image_size:
+            # Return a dummy tile if image is too small
+            return np.zeros(
+                (self.channels, self.image_size, self.image_size), dtype=np.float32
+            ), self.get_label(idx)
+
+        # Generate random crop position
+        max_y = H - self.image_size
+        max_x = W - self.image_size
+        y_start = random.randint(0, max_y) if max_y > 0 else 0
+        x_start = random.randint(0, max_x) if max_x > 0 else 0
+        y_end = y_start + self.image_size
+        x_end = x_start + self.image_size
+
+        tile_data = image[:, y_start:y_end, x_start:x_end].copy()
+
+        if tile_data.shape != (self.channels, self.image_size, self.image_size):
+            # Pad or crop if needed
+            if (
+                tile_data.shape[1] < self.image_size
+                or tile_data.shape[2] < self.image_size
+            ):
+                pad_h = max(0, self.image_size - tile_data.shape[1])
+                pad_w = max(0, self.image_size - tile_data.shape[2])
+                tile_data = np.pad(
+                    tile_data, ((0, 0), (0, pad_h), (0, pad_w)), mode="reflect"
+                )
+            tile_data = tile_data[:, : self.image_size, : self.image_size]
+
+        tile_data = _normalize_to_diffusion_range(tile_data)
+
+        return tile_data.astype(np.float32), self.get_label(idx)
 
 
 class TileDataset(Dataset):

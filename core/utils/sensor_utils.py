@@ -7,7 +7,7 @@ conversion utilities, and demosaicing functions for raw image processing.
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import rawpy

@@ -146,8 +146,9 @@ fi
 OUTPUT_DIR="${OUTPUT_DIR:-}"
 if [ -z "$OUTPUT_DIR" ]; then
     TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-    # Extract sensor from config file name or default to sony
-    SENSOR=$(basename "$CONFIG_FILE" .yaml | grep -oE "(sony|fuji)" || echo "sony")
+    # Extract sensor from config file name (sony, fuji, sidd, etc.)
+    CONFIG_BASENAME=$(basename "$CONFIG_FILE" .yaml)
+    SENSOR=$(echo "$CONFIG_BASENAME" | grep -oE "(sony|fuji|sidd)" || echo "$CONFIG_BASENAME")
     OUTPUT_DIR="results/edm_${SENSOR}_training_${TIMESTAMP}"
 fi
 BATCH_SIZE=$(python3 -c "import yaml; f=open('$CONFIG_FILE'); c=yaml.safe_load(f); print(c.get('batch_size', 4))" 2>/dev/null || echo "4")

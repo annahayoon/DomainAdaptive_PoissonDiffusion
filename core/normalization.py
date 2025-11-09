@@ -5,11 +5,30 @@ from typing import Dict, Optional, Tuple, Union
 import numpy as np
 import torch
 
-from .sensor_config import (
-    get_sensor_black_level,
-    get_sensor_config,
-    get_sensor_white_level,
-)
+# Try to import sensor_config, but make it optional
+try:
+    from .sensor_config import (
+        get_sensor_black_level,
+        get_sensor_config,
+        get_sensor_white_level,
+    )
+
+    _SENSOR_CONFIG_AVAILABLE = True
+except ImportError:
+    _SENSOR_CONFIG_AVAILABLE = False
+
+    # Provide stub functions if sensor_config is not available
+    def get_sensor_config(sensor: str) -> Dict:
+        raise ImportError(
+            "sensor_config module not available. "
+            "Please provide explicit black_level and white_level parameters."
+        )
+
+    def get_sensor_black_level(sensor: str) -> float:
+        raise ImportError("sensor_config module not available")
+
+    def get_sensor_white_level(sensor: str) -> float:
+        raise ImportError("sensor_config module not available")
 
 
 def _extract_range_parameters(
@@ -39,6 +58,11 @@ def _extract_range_parameters(
     """
     if sensor is not None:
         # Use sensor configuration
+        if not _SENSOR_CONFIG_AVAILABLE:
+            raise ImportError(
+                "sensor_config module not available. "
+                "Please provide explicit black_level and white_level parameters instead of sensor name."
+            )
         sensor_cfg = get_sensor_config(sensor)
         range_min = sensor_cfg["black_level"]
         range_max = sensor_cfg["white_level"]
@@ -163,6 +187,11 @@ def reverse_normalize_from_neg_one_to_raw(
     value_01_tensor = convert_range(value_tensor, from_range="[-1,1]", to_range="[0,1]")
     value_01 = np.clip(value_01_tensor.numpy(), 0.0, 1.0)
 
+    if not _SENSOR_CONFIG_AVAILABLE:
+        raise ImportError(
+            "sensor_config module not available. "
+            "Cannot use reverse_normalize_from_neg_one_to_raw without sensor_config."
+        )
     black_level = get_sensor_black_level(sensor_type)
     white_level = get_sensor_white_level(sensor_type)
     return value_01 * (white_level - black_level) + black_level

@@ -17,10 +17,17 @@ from config.config import (
     DEFAULT_SIGMA_R,
     DEFAULT_TAU,
     SENSOR_NAME_MAPPING,
-    SENSOR_RANGES,
     SUPPORTED_SENSORS,
     TILE_SIZE,
 )
+
+# SENSOR_RANGES was moved to core.sensor_config - try to import it, but make it optional
+try:
+    from config.config import SENSOR_RANGES
+except ImportError:
+    # SENSOR_RANGES is not available in config.config (moved to core.sensor_config)
+    # Provide a default empty dict for backward compatibility
+    SENSOR_RANGES = {}
 
 # Re-export for backward compatibility
 DEFAULT_SENSOR_RANGES = SENSOR_RANGES
